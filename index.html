@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Mi Medicación</title>
     <meta name="theme-color" content="#6366f1">
-    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -42,7 +42,10 @@ const CONFIG={
     AVISO_MINUTOS:5
 };
 
-let supabase=null,currentUser=null;
+// SOLUCIÓN AL ERROR: Declarar supabase solo una vez
+let supabase = null;
+let currentUser = null;
+
 const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false};
 
 // Utilidades
@@ -61,30 +64,75 @@ const U={
 // Base de datos local
 const DB={
     get:k=>{try{const d=localStorage.getItem('med_'+k);return d?JSON.parse(d):null}catch{return null}},
-    set:(k,v)=>{try{localStorage.setItem('med_'+k,JSON.stringify(v))}catch{}},
+    set:(k,v)=>{try{localStorage.setItem('med_'+k,JSON.stringify(v))}catch(e){console.error('Error guardando en localStorage:',e)}},
     load:()=>{state.meds=DB.get('meds')||[];state.history=DB.get('history')||[];currentUser=DB.get('user')},
     save:()=>{DB.set('meds',state.meds);DB.set('history',state.history);if(currentUser)DB.set('user',currentUser)}
 };
 
 // Supabase
 const Cloud={
-    init:()=>{if(CONFIG.SUPABASE_URL!=='TU_SUPABASE_URL')supabase=window.supabase.createClient(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_KEY)},
+    init:()=>{
+        if(CONFIG.SUPABASE_URL!=='TU_SUPABASE_URL'){
+            try{
+                supabase=window.supabase.createClient(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_KEY);
+            }catch(e){
+                console.error('Error inicializando Supabase:',e);
+            }
+        }
+    },
     async login(email,pwd){
         if(!supabase)return{error:'Supabase no configurado'};
-        let{data,error}=await supabase.auth.signInWithPassword({email,password:pwd});
-        if(error){({data,error}=await supabase.auth.signUp({email,password:pwd}))}
-        if(!error&&data.user){currentUser={id:data.user.id,email:data.user.email};DB.set('user',currentUser);await Cloud.loadData()}
-        return{data,error}
+        try{
+            let{data,error}=await supabase.auth.signInWithPassword({email,password:pwd});
+            if(error){({data,error}=await supabase.auth.signUp({email,password:pwd}))}
+            if(!error&&data.user){currentUser={id:data.user.id,email:data.user.email};DB.set('user',currentUser);await Cloud.loadData()}
+            return{data,error}
+        }catch(e){
+            console.error('Error en login:',e);
+            return{error:e}
+        }
     },
     async loadData(){
         if(!supabase||!currentUser)return;
-        const{data:m}=await supabase.from('medicamentos').select('*').eq('user_id',currentUser.id).eq('activo',true);
-        const{data:h}=await supabase.from('historial').select('*').eq('user_id',currentUser.id).order('created_at',{ascending:false}).limit(100);
-        if(m)state.meds=m;if(h)state.history=h;DB.save()
+        try{
+            const{data:m}=await supabase.from('medicamentos').select('*').eq('user_id',currentUser.id).eq('activo',true);
+            const{data:h}=await supabase.from('historial').select('*').eq('user_id',currentUser.id).order('created_at',{ascending:false}).limit(100);
+            if(m)state.meds=m;if(h)state.history=h;DB.save()
+        }catch(e){
+            console.error('Error cargando datos:',e);
+        }
     },
-    async saveMed(med){DB.save();if(!supabase||!currentUser)return;await supabase.from('medicamentos').upsert({...med,user_id:currentUser.id})},
-    async saveHist(e){DB.save();if(!supabase||!currentUser)return;await supabase.from('historial').insert({...e,user_id:currentUser.id})},
-    async logout(){if(supabase)await supabase.auth.signOut();localStorage.clear();currentUser=null;state.meds=[];state.history=[];state.screen='login';render()}
+    async saveMed(med){
+        DB.save();
+        if(!supabase||!currentUser)return;
+        try{
+            await supabase.from('medicamentos').upsert({...med,user_id:currentUser.id})
+        }catch(e){
+            console.error('Error guardando medicamento:',e);
+        }
+    },
+    async saveHist(e){
+        DB.save();
+        if(!supabase||!currentUser)return;
+        try{
+            await supabase.from('historial').insert({...e,user_id:currentUser.id})
+        }catch(e){
+            console.error('Error guardando historial:',e);
+        }
+    },
+    async logout(){
+        try{
+            if(supabase)await supabase.auth.signOut();
+        }catch(e){
+            console.error('Error en logout:',e);
+        }
+        localStorage.clear();
+        currentUser=null;
+        state.meds=[];
+        state.history=[];
+        state.screen='login';
+        render()
+    }
 };
 
 // Gemini OCR
@@ -97,7 +145,10 @@ const Gemini={
             const res=await r.json();let txt=res.candidates?.[0]?.content?.parts?.[0]?.text||'';
             txt=txt.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
             return JSON.parse(txt)
-        }catch{return Gemini.mock()}
+        }catch(e){
+            console.error('Error en análisis Gemini:',e);
+            return Gemini.mock()
+        }
     },
     mock:()=>[{nombre:'Omeprazol',dosis:'20mg',frecuencia:24,dias:0,notas:'30 min antes desayuno'},{nombre:'Paracetamol',dosis:'1g',frecuencia:8,dias:0,notas:'Si hay dolor'},{nombre:'Metamizol',dosis:'575mg',frecuencia:8,dias:0,notas:'Alternar con paracetamol'},{nombre:'Diosmina',dosis:'1 comp',frecuencia:8,dias:15,notas:''},{nombre:'Tisuderma',dosis:'2.5%',frecuencia:12,dias:10,notas:'Mañana y noche'}],
     async advice(ctx,action){
@@ -110,9 +161,16 @@ const Gemini={
 const Notif={
     async request(){
         if(!('Notification'in window)){U.toast('Tu navegador no soporta notificaciones','error');return false}
-        const p=await Notification.requestPermission();state.perms.notif=p==='granted';
-        if(p==='granted'){Notif.schedule();U.toast('✅ Notificaciones activadas')}
-        render();return p==='granted'
+        try{
+            const p=await Notification.requestPermission();
+            state.perms.notif=p==='granted';
+            if(p==='granted'){Notif.schedule();U.toast('✅ Notificaciones activadas')}
+            render();
+            return p==='granted'
+        }catch(e){
+            console.error('Error solicitando notificaciones:',e);
+            return false
+        }
     },
     schedule(){setInterval(Notif.check,60000);Notif.check()},
     check(){
@@ -125,7 +183,13 @@ const Notif={
             if(diff===0)Notif.send(`💊 ¡Hora de ${m.nombre}!`,`Toma ${m.dosis} ahora`)
         })
     },
-    send:(title,body)=>{if(Notification.permission==='granted')new Notification(title,{body,icon:'icons/icon-192.png',vibrate:[200,100,200],tag:'med',renotify:true})}
+    send:(title,body)=>{
+        try{
+            if(Notification.permission==='granted')new Notification(title,{body,icon:'icons/icon-192.png',vibrate:[200,100,200],tag:'med',renotify:true})
+        }catch(e){
+            console.error('Error enviando notificación:',e);
+        }
+    }
 };
 
 // Cámara
@@ -222,7 +286,7 @@ window.setHistFilter=t=>{state.histFilter.type=t;render()};
 window.setHistMed=id=>{state.histFilter.medId=id||null;render()};
 window.setHistDate=o=>{const d=new Date(state.histFilter.date);d.setDate(d.getDate()+o);state.histFilter.date=d;render()};
 window.reqNotif=()=>Notif.request();
-window.reqCam=async()=>{try{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(t=>t.stop());state.perms.camera=true;render()}catch{}};
+window.reqCam=async()=>{try{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(t=>t.stop());state.perms.camera=true;render()}catch(e){console.error('Error solicitando cámara:',e)}};
 window.goLogin=()=>{state.screen='login';render()};
 window.skipPerms=()=>{state.screen='login';render()};
 window.doLogin=async()=>{const e=document.getElementById('email')?.value,p=document.getElementById('pwd')?.value;if(!e||!p){U.toast('Introduce email y contraseña','error');return}state.loading=true;render();const{error}=await Cloud.login(e,p);state.loading=false;if(error)U.toast('Error: '+error.message,'error');else{state.screen='app';render()}};
@@ -297,11 +361,22 @@ function renderAI(){
 
 // Init
 async function init(){
-    Cloud.init();DB.load();
+    Cloud.init();
+    DB.load();
     if('Notification'in window&&Notification.permission==='granted')state.perms.notif=true;
     render();
-    setTimeout(()=>{if(currentUser){state.screen='app';if(state.perms.notif)Notif.schedule()}else state.screen='permissions';render()},2000);
-    if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(console.error)
+    setTimeout(()=>{
+        if(currentUser){
+            state.screen='app';
+            if(state.perms.notif)Notif.schedule()
+        }else{
+            state.screen='permissions'
+        }
+        render()
+    },2000);
+    if('serviceWorker'in navigator){
+        navigator.serviceWorker.register('sw.js').catch(e=>console.error('Error registrando SW:',e))
+    }
 }
 init();
 </script>
