@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mi Medicación</title>
+    <meta name="theme-color" content="#6366f1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:0}
+        input,select,textarea{font-size:16px!important}
+        .hide-scrollbar::-webkit-scrollbar{display:none}
+        .hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}
+        @keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+        @keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .animate-slideUp{animation:slideUp .3s ease-out}
+        .animate-slideDown{animation:slideDown .3s ease-out}
+        .animate-fadeIn{animation:fadeIn .3s ease-out}
+        .animate-pulse{animation:pulse 2s infinite}
+        .animate-spin{animation:spin 1s linear infinite}
+    </style>
+</head>
+<body class="bg-gray-100">
+<div id="app"></div>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//                    CONFIGURACIÓN - EDITAR ESTOS VALORES
+// ═══════════════════════════════════════════════════════════════════════════
+const CONFIG={
+    SUPABASE_URL:'TU_SUPABASE_URL',
+    SUPABASE_KEY:'TU_SUPABASE_ANON_KEY',
+    GEMINI_API_KEY:'TU_GEMINI_API_KEY',
+    AVISO_MINUTOS:5
+};
+
+let supabase=null,currentUser=null;
+const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false};
+
+// Utilidades
+const U={
+    time:(d=new Date())=>d.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}),
+    date:(d=new Date())=>d.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),
+    dateISO:(d=new Date())=>d.toISOString().split('T')[0],
+    parseT:t=>{const[h,m]=t.split(':').map(Number);return h*60+m},
+    toTime:m=>`${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`,
+    nextDose:(from,freq)=>U.toTime((U.parseT(from)+freq*60)%(24*60)),
+    genId:()=>Date.now().toString(36)+Math.random().toString(36).substr(2),
+    toast:(msg,type='success')=>{state.toast={msg,type};render();setTimeout(()=>{state.toast=null;render()},3000)},
+    takenToday:id=>state.history.some(h=>h.med_id===id&&h.fecha.startsWith(U.dateISO())&&h.estado==='tomado')
+};
+
+// Base de datos local
+const DB={
+    get:k=>{try{const d=localStorage.getItem('med_'+k);return d?JSON.parse(d):null}catch{return null}},
+    set:(k,v)=>{try{localStorage.setItem('med_'+k,JSON.stringify(v))}catch{}},
+    load:()=>{state.meds=DB.get('meds')||[];state.history=DB.get('history')||[];currentUser=DB.get('user')},
+    save:()=>{DB.set('meds',state.meds);DB.set('history',state.history);if(currentUser)DB.set('user',currentUser)}
+};
+
+// Supabase
+const Cloud={
+    init:()=>{if(CONFIG.SUPABASE_URL!=='TU_SUPABASE_URL')supabase=window.supabase.createClient(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_KEY)},
+    async login(email,pwd){
+        if(!supabase)return{error:'Supabase no configurado'};
+        let{data,error}=await supabase.auth.signInWithPassword({email,password:pwd});
+        if(error){({data,error}=await supabase.auth.signUp({email,password:pwd}))}
+        if(!error&&data.user){currentUser={id:data.user.id,email:data.user.email};DB.set('user',currentUser);await Cloud.loadData()}
+        return{data,error}
+    },
+    async loadData(){
+        if(!supabase||!currentUser)return;
+        const{data:m}=await supabase.from('medicamentos').select('*').eq('user_id',currentUser.id).eq('activo',true);
+        const{data:h}=await supabase.from('historial').select('*').eq('user_id',currentUser.id).order('created_at',{ascending:false}).limit(100);
+        if(m)state.meds=m;if(h)state.history=h;DB.save()
+    },
+    async saveMed(med){DB.save();if(!supabase||!currentUser)return;await supabase.from('medicamentos').upsert({...med,user_id:currentUser.id})},
+    async saveHist(e){DB.save();if(!supabase||!currentUser)return;await supabase.from('historial').insert({...e,user_id:currentUser.id})},
+    async logout(){if(supabase)await supabase.auth.signOut();localStorage.clear();currentUser=null;state.meds=[];state.history=[];state.screen='login';render()}
+};
+
+// Gemini OCR
+const Gemini={
+    async analyze(b64){
+        if(CONFIG.GEMINI_API_KEY==='TU_GEMINI_API_KEY')return Gemini.mock();
+        const url=`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CONFIG.GEMINI_API_KEY}`;
+        try{
+            const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:'Analiza esta receta médica y devuelve JSON: [{"nombre":"...","dosis":"...","frecuencia":8,"dias":0,"notas":"..."}]. Responde SOLO el JSON.'},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{temperature:0.1}})});
+            const res=await r.json();let txt=res.candidates?.[0]?.content?.parts?.[0]?.text||'';
+            txt=txt.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+            return JSON.parse(txt)
+        }catch{return Gemini.mock()}
+    },
+    mock:()=>[{nombre:'Omeprazol',dosis:'20mg',frecuencia:24,dias:0,notas:'30 min antes desayuno'},{nombre:'Paracetamol',dosis:'1g',frecuencia:8,dias:0,notas:'Si hay dolor'},{nombre:'Metamizol',dosis:'575mg',frecuencia:8,dias:0,notas:'Alternar con paracetamol'},{nombre:'Diosmina',dosis:'1 comp',frecuencia:8,dias:15,notas:''},{nombre:'Tisuderma',dosis:'2.5%',frecuencia:12,dias:10,notas:'Mañana y noche'}],
+    async advice(ctx,action){
+        const consejos={skip:'Has saltado una toma. Si es por mejoría, consulta con tu médico.',late:'La próxima toma se ha recalculado para mantener el intervalo correcto.',edit:'Has modificado la pauta. Consulta con tu médico cualquier cambio importante.'};
+        return consejos[action]||'Recuerda seguir las indicaciones de tu médico.'
+    }
+};
+
+// Notificaciones
+const Notif={
+    async request(){
+        if(!('Notification'in window)){U.toast('Tu navegador no soporta notificaciones','error');return false}
+        const p=await Notification.requestPermission();state.perms.notif=p==='granted';
+        if(p==='granted'){Notif.schedule();U.toast('✅ Notificaciones activadas')}
+        render();return p==='granted'
+    },
+    schedule(){setInterval(Notif.check,60000);Notif.check()},
+    check(){
+        if(!state.perms.notif)return;
+        const now=U.parseT(U.time());
+        state.meds.forEach(m=>{
+            if(!m.activo)return;
+            const t=U.parseT(m.proxima_toma),diff=t-now;
+            if(diff===CONFIG.AVISO_MINUTOS)Notif.send(`⏰ ${m.nombre} en ${CONFIG.AVISO_MINUTOS} min`,m.dosis);
+            if(diff===0)Notif.send(`💊 ¡Hora de ${m.nombre}!`,`Toma ${m.dosis} ahora`)
+        })
+    },
+    send:(title,body)=>{if(Notification.permission==='granted')new Notification(title,{body,icon:'icons/icon-192.png',vibrate:[200,100,200],tag:'med',renotify:true})}
+};
+
+// Cámara
+const Cam={
+    async select(){
+        return new Promise(res=>{
+            const inp=document.createElement('input');inp.type='file';inp.accept='image/*';
+            inp.onchange=e=>{const f=e.target.files[0];if(!f)return res(null);const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.readAsDataURL(f)};
+            inp.click()
+        })
+    }
+};
+
+// Acciones
+const Act={
+    async take(med,time=null){
+        const hr=time||U.time(),prox=U.nextDose(hr,med.frecuencia);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=prox;Cloud.saveMed(state.meds[i])}
+        const e={id:U.genId(),med_id:med.id,nombre:med.nombre,hora_programada:med.proxima_toma,hora_real:hr,estado:'tomado',proxima_recalculada:prox,fecha:new Date().toISOString(),created_at:new Date().toISOString()};
+        state.history.unshift(e);Cloud.saveHist(e);
+        state.modal=null;state.selMed=null;U.toast(`✅ ${med.nombre} registrado. Próxima: ${prox}`);
+        if(hr!==med.proxima_toma){const a=await Gemini.advice({},'late');setTimeout(()=>{state.aiAdvice={title:'💡 Consejo',msg:a,type:'info'};render()},1000)}
+        render()
+    },
+    async skip(med){
+        const prox=U.nextDose(U.time(),med.frecuencia);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=prox;Cloud.saveMed(state.meds[i])}
+        const e={id:U.genId(),med_id:med.id,nombre:med.nombre,hora_programada:med.proxima_toma,hora_real:'-',estado:'saltado',proxima_recalculada:prox,fecha:new Date().toISOString(),created_at:new Date().toISOString()};
+        state.history.unshift(e);Cloud.saveHist(e);
+        state.modal=null;
+        const skipped=state.history.filter(h=>h.med_id===med.id&&h.estado==='saltado').length;
+        if(skipped>=2){const a=await Gemini.advice({},'skip');state.aiAdvice={title:'⚠️ Atención',msg:a,type:'warning'}}
+        render()
+    },
+    postpone(med,mins){
+        const nt=U.toTime(U.parseT(U.time())+mins);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=nt;Cloud.saveMed(state.meds[i])}
+        state.modal=null;U.toast(`⏰ Recordatorio a las ${nt}`);render()
+    },
+    add(m){
+        const nm={id:U.genId(),nombre:m.nombre,dosis:m.dosis,frecuencia:m.frecuencia||8,hora_inicio:m.horaInicio||'08:00',proxima_toma:U.nextDose(m.horaInicio||'08:00',m.frecuencia||8),dias:m.dias||0,notas:m.notas||'',activo:true,fecha_inicio:U.dateISO(),color:['bg-purple-500','bg-blue-500','bg-green-500','bg-orange-500','bg-pink-500','bg-cyan-500'][state.meds.length%6]};
+        state.meds.push(nm);Cloud.saveMed(nm);return nm
+    },
+    async update(id,upd){
+        const i=state.meds.findIndex(m=>m.id===id);if(i===-1)return;
+        const old={...state.meds[i]};state.meds[i]={...old,...upd};
+        if(upd.frecuencia&&upd.frecuencia!==old.frecuencia)state.meds[i].proxima_toma=U.nextDose(upd.hora_inicio||old.hora_inicio,upd.frecuencia);
+        Cloud.saveMed(state.meds[i]);
+        if(upd.frecuencia||upd.dosis){const a=await Gemini.advice({},'edit');state.aiAdvice={title:'💡 Consejo',msg:a,type:'info'}}
+        state.modal=null;U.toast('✅ Medicamento actualizado');render()
+    },
+    del(id){
+        if(!confirm('¿Eliminar este medicamento?'))return;
+        const i=state.meds.findIndex(m=>m.id===id);
+        if(i!==-1){state.meds[i].activo=false;Cloud.saveMed(state.meds[i])}
+        state.meds=state.meds.filter(m=>m.activo!==false);DB.save();
+        state.modal=null;U.toast('🗑️ Eliminado');render()
+    },
+    async ocr(b64){
+        state.loading=true;render();
+        const ms=await Gemini.analyze(b64);
+        state.loading=false;state.pendingOCR=ms.map((m,i)=>({...m,checked:true,id:i}));state.modal='ocr-results';render()
+    },
+    confirmOCR(){
+        const sel=state.pendingOCR.filter(m=>m.checked);
+        sel.forEach(m=>Act.add(m));
+        state.pendingOCR=[];state.modal=null;U.toast(`✅ ${sel.length} medicamentos añadidos`);render()
+    },
+    filteredHist(){
+        let f=[...state.history];const fl=state.histFilter;
+        if(fl.medId)f=f.filter(h=>h.med_id===fl.medId);
+        if(fl.type==='day'){const d=U.dateISO(fl.date);f=f.filter(h=>h.fecha.startsWith(d))}
+        else if(fl.type==='week'){const ws=new Date(fl.date);ws.setDate(ws.getDate()-ws.getDay());const we=new Date(ws);we.setDate(we.getDate()+7);f=f.filter(h=>{const d=new Date(h.fecha);return d>=ws&&d<we})}
+        return f
+    }
+};
+
+// Handlers globales
+window.setTab=t=>{state.tab=t;render()};
+window.openModal=(m,med=null)=>{state.modal=m;state.selMed=med;render()};
+window.closeModal=()=>{state.modal=null;state.selMed=null;state.pendingOCR=[];render()};
+window.closeAI=()=>{state.aiAdvice=null;render()};
+window.takeMed=(id,t=null)=>{const m=state.meds.find(x=>x.id===id);if(m)Act.take(m,t)};
+window.skipMed=id=>{const m=state.meds.find(x=>x.id===id);if(m)Act.skip(m)};
+window.postponeMed=(id,mins)=>{const m=state.meds.find(x=>x.id===id);if(m)Act.postpone(m,mins)};
+window.delMed=id=>Act.del(id);
+window.toggleOCR=id=>{const i=state.pendingOCR.findIndex(m=>m.id===id);if(i!==-1){state.pendingOCR[i].checked=!state.pendingOCR[i].checked;render()}};
+window.confirmOCR=()=>Act.confirmOCR();
+window.scanRecipe=async()=>{const b=await Cam.select();if(b)await Act.ocr(b)};
+window.setHistFilter=t=>{state.histFilter.type=t;render()};
+window.setHistMed=id=>{state.histFilter.medId=id||null;render()};
+window.setHistDate=o=>{const d=new Date(state.histFilter.date);d.setDate(d.getDate()+o);state.histFilter.date=d;render()};
+window.reqNotif=()=>Notif.request();
+window.reqCam=async()=>{try{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(t=>t.stop());state.perms.camera=true;render()}catch{}};
+window.goLogin=()=>{state.screen='login';render()};
+window.skipPerms=()=>{state.screen='login';render()};
+window.doLogin=async()=>{const e=document.getElementById('email')?.value,p=document.getElementById('pwd')?.value;if(!e||!p){U.toast('Introduce email y contraseña','error');return}state.loading=true;render();const{error}=await Cloud.login(e,p);state.loading=false;if(error)U.toast('Error: '+error.message,'error');else{state.screen='app';render()}};
+window.offlineMode=()=>{currentUser={id:'local',email:'Usuario local'};DB.set('user',currentUser);state.screen='app';render()};
+window.logout=()=>Cloud.logout();
+window.saveEdit=()=>{const f={nombre:document.getElementById('eNombre')?.value,dosis:document.getElementById('eDosis')?.value,frecuencia:parseInt(document.getElementById('eFrec')?.value)||8,hora_inicio:document.getElementById('eHora')?.value,dias:parseInt(document.getElementById('eDias')?.value)||0,notas:document.getElementById('eNotas')?.value||''};if(!f.nombre||!f.dosis){U.toast('Nombre y dosis obligatorios','error');return}Act.update(state.selMed.id,f)};
+window.saveNew=()=>{const f={nombre:document.getElementById('nNombre')?.value,dosis:document.getElementById('nDosis')?.value,frecuencia:parseInt(document.getElementById('nFrec')?.value)||8,horaInicio:document.getElementById('nHora')?.value||'08:00',dias:parseInt(document.getElementById('nDias')?.value)||0,notas:document.getElementById('nNotas')?.value||''};if(!f.nombre||!f.dosis){U.toast('Nombre y dosis obligatorios','error');return}Act.add(f);state.modal=null;U.toast('✅ Medicamento añadido');render()};
+
+// Render
+function render(){
+    const $=document.getElementById('app');
+    if(state.screen==='splash'){$.innerHTML=renderSplash();return}
+    if(state.screen==='permissions'){$.innerHTML=renderPerms();return}
+    if(state.screen==='login'){$.innerHTML=renderLogin();return}
+    $.innerHTML=renderApp()
+}
+
+function renderSplash(){
+    return`<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col items-center justify-center"><div class="text-8xl mb-6">💊</div><h1 class="text-white text-3xl font-bold mb-2">Mi Medicación</h1><p class="text-white/70">Cargando...</p></div>`
+}
+
+function renderPerms(){
+    return`<div class="h-screen bg-gray-50 flex flex-col"><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="text-6xl mb-6">🔐</div><h1 class="text-2xl font-bold text-gray-800 mb-2">Permisos necesarios</h1><p class="text-gray-500 text-center mb-8">Para funcionar correctamente:</p><div class="w-full max-w-sm space-y-4"><div class="p-4 rounded-2xl border-2 ${state.perms.camera?'border-green-500 bg-green-50':'border-gray-200 bg-white'}"><div class="flex items-center gap-4"><div class="w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${state.perms.camera?'bg-green-500 text-white':'bg-gray-100'}">${state.perms.camera?'✓':'📷'}</div><div class="flex-1"><h3 class="font-bold text-gray-800">Cámara</h3><p class="text-sm text-gray-500">Para escanear recetas</p></div>${!state.perms.camera?'<button onclick="reqCam()" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">Permitir</button>':''}</div></div><div class="p-4 rounded-2xl border-2 ${state.perms.notif?'border-green-500 bg-green-50':'border-gray-200 bg-white'}"><div class="flex items-center gap-4"><div class="w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${state.perms.notif?'bg-green-500 text-white':'bg-gray-100'}">${state.perms.notif?'✓':'🔔'}</div><div class="flex-1"><h3 class="font-bold text-gray-800">Notificaciones</h3><p class="text-sm text-gray-500">Para recordatorios</p></div>${!state.perms.notif?'<button onclick="reqNotif()" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">Permitir</button>':''}</div></div></div></div><div class="p-6"><button onclick="goLogin()" ${!state.perms.camera||!state.perms.notif?'disabled':''} class="w-full py-4 rounded-2xl font-bold text-lg ${state.perms.camera&&state.perms.notif?'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg':'bg-gray-200 text-gray-400'}">Continuar</button><button onclick="skipPerms()" class="w-full mt-3 text-gray-400 text-sm">Saltar por ahora</button></div></div>`
+}
+
+function renderLogin(){
+    return`<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col"><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="text-7xl mb-6">💊</div><h1 class="text-white text-3xl font-bold mb-2">Mi Medicación</h1><p class="text-white/70 mb-10">Gestiona tus medicamentos</p><div class="w-full max-w-sm space-y-4"><input id="email" type="email" placeholder="tu@email.com" class="w-full bg-white/20 backdrop-blur text-white placeholder-white/50 rounded-2xl px-4 py-4 outline-none"><input id="pwd" type="password" placeholder="Contraseña" class="w-full bg-white/20 backdrop-blur text-white placeholder-white/50 rounded-2xl px-4 py-4 outline-none"><button onclick="doLogin()" class="w-full bg-white text-indigo-600 py-4 rounded-2xl font-bold text-lg shadow-lg">${state.loading?'Cargando...':'Entrar'}</button><button onclick="offlineMode()" class="w-full text-white/70 py-3 text-sm">Usar sin cuenta (solo este dispositivo)</button></div></div></div>`
+}
+
+function renderApp(){
+    const pend=state.meds.filter(m=>m.activo&&!U.takenToday(m.id)),comp=state.meds.filter(m=>m.activo&&U.takenToday(m.id)),prog=state.meds.filter(m=>m.activo).length>0?Math.round(comp.length/state.meds.filter(m=>m.activo).length*100):0,now=U.time(),date=U.date();
+    let content='';
+    if(state.tab==='home')content=renderHome(pend,comp,prog,now,date);
+    else if(state.tab==='meds')content=renderMeds();
+    else if(state.tab==='history')content=renderHistory();
+    else if(state.tab==='profile')content=renderProfile();
+    return`<div class="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative"><div class="flex-1 overflow-y-auto pb-20 hide-scrollbar">${content}</div><div class="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg max-w-md mx-auto"><div class="flex justify-around py-2">${['home','meds','history','profile'].map(t=>`<button onclick="setTab('${t}')" class="flex flex-col items-center py-2 px-4 rounded-xl ${state.tab===t?'text-indigo-600 bg-indigo-50':'text-gray-400'}"><span class="text-xl">${{home:'🏠',meds:'💊',history:'📊',profile:'👤'}[t]}</span><span class="text-xs mt-1">${{home:'Inicio',meds:'Medicinas',history:'Historial',profile:'Perfil'}[t]}</span></button>`).join('')}</div></div>${state.modal?renderModal():''}${state.aiAdvice?renderAI():''}${state.toast?`<div class="fixed top-4 left-4 right-4 z-50 max-w-md mx-auto animate-slideDown"><div class="${state.toast.type==='success'?'bg-green-500':'bg-red-500'} text-white p-4 rounded-2xl shadow-xl flex items-center gap-3"><span class="text-xl">${state.toast.type==='success'?'✓':'!'}</span><p class="font-medium">${state.toast.msg}</p></div></div>`:''}${state.loading?'<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div class="bg-white rounded-2xl p-6 flex flex-col items-center"><div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div><p class="text-gray-600">Procesando...</p></div></div>':''}</div>`
+}
+
+function renderHome(pend,comp,prog,now,date){
+    return`<div class="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white p-5 rounded-b-3xl"><div class="flex justify-between items-start mb-3"><div><p class="text-purple-200 text-sm">Buenos días 👋</p><h1 class="text-2xl font-bold">Mi Medicación</h1></div><div class="text-right"><p class="text-3xl font-bold">${now}</p><p class="text-purple-200 text-xs capitalize">${date}</p></div></div><div class="bg-white/20 backdrop-blur rounded-2xl p-4 mt-2"><div class="flex justify-between items-center mb-2"><span class="text-sm">Progreso de hoy</span><span class="font-bold">${comp.length}/${state.meds.filter(m=>m.activo).length}</span></div><div class="h-3 bg-white/30 rounded-full overflow-hidden"><div class="h-full bg-white rounded-full transition-all" style="width:${prog}%"></div></div></div>${pend.length>0&&pend[0].proxima_toma?`<div class="mt-3 bg-yellow-400 text-yellow-900 rounded-xl p-3 flex items-center gap-3"><span class="text-2xl">⏰</span><div><p class="font-bold">${pend[0].nombre}</p><p class="text-sm">A las ${pend[0].proxima_toma}</p></div></div>`:''}</div><div class="px-4 -mt-4"><div class="bg-white rounded-2xl shadow-lg p-4 flex gap-3"><button onclick="openModal('camera')" class="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">📷</span><span class="text-xs font-medium">Escanear</span></button><button onclick="openModal('add')" class="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">➕</span><span class="text-xs font-medium">Añadir</span></button>${pend.length>0?`<button onclick="openModal('reminder',state.meds.find(m=>m.id==='${pend[0].id}'))" class="flex-1 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">🔔</span><span class="text-xs font-medium">Aviso</span></button>`:''}</div></div>${pend.length>0?`<div class="px-4 mt-6"><h2 class="text-lg font-bold text-gray-800 mb-3">⏰ Pendientes</h2><div class="space-y-3">${pend.map(m=>`<div class="bg-white rounded-2xl shadow-md p-4 border-l-4 border-orange-400"><div class="flex items-center gap-4"><div class="w-14 h-14 ${m.color||'bg-gray-500'} rounded-xl flex items-center justify-center text-2xl shadow-md">💊</div><div class="flex-1"><h3 class="font-bold text-gray-800">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis}</p>${m.notas?`<p class="text-xs text-gray-400 mt-1">📝 ${m.notas}</p>`:''}</div><div class="text-right"><p class="font-bold text-orange-500">${m.proxima_toma}</p>${m.dias?`<p class="text-xs text-gray-400">📅 ${m.dias}d</p>`:''}</div></div><div class="flex gap-2 mt-3"><button onclick="takeMed('${m.id}')" class="flex-1 bg-green-500 text-white py-2 rounded-xl text-sm font-medium">✅ Ahora (${now})</button><button onclick="openModal('time',state.meds.find(x=>x.id==='${m.id}'))" class="flex-1 bg-blue-100 text-blue-700 py-2 rounded-xl text-sm font-medium">🕐 Otra hora</button></div></div>`).join('')}</div></div>`:''}${comp.length>0?`<div class="px-4 mt-6"><h2 class="text-lg font-bold text-gray-800 mb-3">✅ Completadas</h2><div class="space-y-2">${comp.map(m=>`<div class="bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-3"><div class="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center text-white">✓</div><div class="flex-1"><h3 class="font-medium text-green-800">${m.nombre}</h3><p class="text-xs text-green-600">${m.dosis}</p></div><div class="text-right"><p class="text-xs text-green-600">Próxima</p><p class="font-bold text-green-700">${m.proxima_toma}</p></div></div>`).join('')}</div></div>`:''}${state.meds.filter(m=>m.activo).length===0?'<div class="px-4 mt-12 text-center"><div class="text-6xl mb-4">💊</div><h3 class="text-xl font-bold text-gray-700 mb-2">Sin medicamentos</h3><p class="text-gray-500">Escanea una receta o añade uno manualmente</p></div>':''}`
+}
+
+function renderMeds(){
+    const active=state.meds.filter(m=>m.activo);
+    return`<div class="bg-white p-4 border-b sticky top-0 z-10 flex justify-between items-center"><div><h1 class="text-xl font-bold text-gray-800">💊 Medicamentos</h1><p class="text-sm text-gray-500">${active.length} activos</p></div><button onclick="openModal('add')" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">+ Añadir</button></div><div class="p-4 space-y-3">${active.length===0?'<div class="text-center py-12"><div class="text-5xl mb-4">📋</div><p class="text-gray-500">No hay medicamentos</p></div>':''}${active.map(m=>`<div class="bg-white rounded-2xl shadow-md overflow-hidden"><div class="${m.color||'bg-gray-500'} p-4 flex items-center gap-3"><span class="text-3xl">💊</span><div class="text-white flex-1"><h3 class="font-bold text-lg">${m.nombre}</h3><p class="text-white/80 text-sm">${m.dosis}</p></div>${m.dias?`<div class="bg-white/20 px-3 py-1 rounded-full"><span class="text-white text-sm">${m.dias}d</span></div>`:''}</div><div class="p-4"><div class="grid grid-cols-2 gap-4 text-sm"><div><p class="text-gray-400">Frecuencia</p><p class="font-bold text-gray-800">Cada ${m.frecuencia}h</p></div><div><p class="text-gray-400">Próxima toma</p><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div>${m.notas?`<div class="mt-3 bg-gray-50 rounded-lg p-2"><p class="text-sm text-gray-600">📝 ${m.notas}</p></div>`:''}<div class="mt-3 pt-3 border-t flex gap-2"><button onclick="openModal('edit',state.meds.find(x=>x.id==='${m.id}'))" class="flex-1 text-indigo-500 py-2 text-sm font-medium">✏️ Editar</button><button onclick="delMed('${m.id}')" class="flex-1 text-red-500 py-2 text-sm font-medium">🗑️ Eliminar</button></div></div></div>`).join('')}</div>`
+}
+
+function renderHistory(){
+    const f=Act.filteredHist(),fl=state.histFilter,active=state.meds.filter(m=>m.activo);
+    return`<div class="bg-white p-4 border-b sticky top-0 z-10"><h1 class="text-xl font-bold text-gray-800">📊 Historial</h1><div class="flex gap-2 mt-3">${['day','week','month'].map(t=>`<button onclick="setHistFilter('${t}')" class="flex-1 py-2 rounded-xl text-sm font-medium ${fl.type===t?'bg-indigo-500 text-white':'bg-gray-100 text-gray-600'}">${{day:'Día',week:'Semana',month:'Mes'}[t]}</button>`).join('')}</div><div class="flex items-center justify-between mt-3"><button onclick="setHistDate(-1)" class="p-2 rounded-lg bg-gray-100">←</button><span class="font-medium text-gray-700">${fl.date.toLocaleDateString('es-ES',{day:'numeric',month:'short',year:'numeric'})}</span><button onclick="setHistDate(1)" class="p-2 rounded-lg bg-gray-100">→</button></div><select onchange="setHistMed(this.value)" class="w-full mt-3 p-3 rounded-xl border border-gray-200 text-gray-700"><option value="">Todos los medicamentos</option>${active.map(m=>`<option value="${m.id}" ${fl.medId===m.id?'selected':''}>${m.nombre}</option>`).join('')}</select></div><div class="p-4 space-y-3">${f.length===0?'<div class="text-center py-12"><div class="text-5xl mb-4">📊</div><p class="text-gray-500">No hay registros</p></div>':''}${f.map(h=>`<div class="bg-white rounded-xl p-4 shadow-sm border"><div class="flex items-start gap-3"><div class="w-10 h-10 rounded-full flex items-center justify-center text-lg ${h.estado==='tomado'?'bg-green-100 text-green-600':'bg-red-100 text-red-600'}">${h.estado==='tomado'?'✓':'✗'}</div><div class="flex-1"><h4 class="font-bold text-gray-800">${h.nombre}</h4><p class="text-xs text-gray-400">${new Date(h.fecha).toLocaleString('es-ES')}</p><div class="mt-2 grid grid-cols-2 gap-2 text-sm"><div class="bg-gray-50 rounded-lg p-2"><p class="text-xs text-gray-400">Programada</p><p class="font-medium text-gray-600">${h.hora_programada}</p></div><div class="${h.estado==='tomado'?'bg-green-50':'bg-red-50'} rounded-lg p-2"><p class="text-xs text-gray-400">Real</p><p class="font-bold ${h.estado==='tomado'?'text-green-600':'text-red-600'}">${h.hora_real}</p></div></div>${h.proxima_recalculada&&h.hora_real!==h.hora_programada?`<div class="mt-2 bg-blue-50 rounded-lg p-2 flex items-center gap-2"><span class="text-blue-500">🔄</span><div><p class="text-xs text-blue-600">Próxima recalculada</p><p class="font-bold text-blue-700">${h.proxima_recalculada}</p></div></div>`:''}</div></div></div>`).join('')}</div>`
+}
+
+function renderProfile(){
+    return`<div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-6 rounded-b-3xl"><div class="flex items-center gap-4"><div class="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center text-3xl">👤</div><div><h2 class="text-xl font-bold">${currentUser?.email||'Usuario'}</h2><p class="text-purple-200 text-sm">${currentUser?.id==='local'?'Modo sin conexión':'Sincronizado'}</p></div></div></div><div class="p-4 space-y-4"><div class="bg-white rounded-2xl shadow-md overflow-hidden"><div class="p-4 border-b bg-gray-50"><h3 class="font-bold text-gray-800">🔔 Notificaciones</h3></div><div class="p-4 space-y-4"><div class="flex justify-between items-center"><span>Estado</span>${state.perms.notif?'<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-medium">✓ Activadas</span>':'<button onclick="reqNotif()" class="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm">Activar</button>'}</div><div class="flex justify-between items-center"><span>Aviso anticipado</span><span class="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full font-bold">${CONFIG.AVISO_MINUTOS} min</span></div></div></div><div class="bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl p-4 text-white"><h3 class="font-bold mb-2">🤖 Consejos con IA</h3><p class="text-sm text-white/80">Gemini analiza tu pauta y te da recomendaciones personalizadas</p></div><div class="bg-white rounded-2xl shadow-md p-4"><div class="flex items-center gap-3 text-gray-600 mb-4"><span>🔒</span><span>Tus datos son 100% privados</span></div><button onclick="logout()" class="w-full bg-red-50 text-red-600 py-3 rounded-xl font-medium">Cerrar sesión</button></div></div>`
+}
+
+function renderModal(){
+    const m=state.selMed;
+    if(state.modal==='reminder'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp"><div class="bg-yellow-400 text-yellow-900 px-4 py-2 flex items-center gap-2"><span>⏰</span><span class="font-medium">Recordatorio</span></div><div class="${m.color||'bg-indigo-500'} p-6 text-white text-center"><span class="text-6xl">💊</span><h2 class="text-2xl font-bold mt-4">${m.nombre}</h2><p class="text-white/80">${m.dosis}</p></div><div class="p-6"><div class="text-center mb-6"><p class="text-gray-500">Hora programada</p><p class="text-4xl font-bold text-gray-800">${m.proxima_toma}</p>${m.notas?`<p class="text-sm text-gray-500 mt-2 bg-gray-100 rounded-lg p-2">📝 ${m.notas}</p>`:''}</div><div class="space-y-2"><button onclick="takeMed('${m.id}')" class="w-full bg-gradient-to-r from-green-500 to-emerald-500 text-white py-4 rounded-xl font-bold text-lg">✅ Tomada ahora (${U.time()})</button><button onclick="openModal('time',state.selMed)" class="w-full bg-blue-100 text-blue-700 py-3 rounded-xl font-medium">🕐 Indicar otra hora</button><div class="flex gap-2"><button onclick="postponeMed('${m.id}',15)" class="flex-1 bg-yellow-100 text-yellow-700 py-3 rounded-xl font-medium">⏰ +15 min</button><button onclick="postponeMed('${m.id}',30)" class="flex-1 bg-yellow-100 text-yellow-700 py-3 rounded-xl font-medium">⏰ +30 min</button></div><button onclick="skipMed('${m.id}')" class="w-full bg-gray-100 text-gray-600 py-3 rounded-xl font-medium">❌ Saltar esta toma</button></div></div></div></div>`;
+    if(state.modal==='time'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-3xl w-full max-w-sm overflow-hidden animate-slideUp"><div class="${m.color||'bg-indigo-500'} p-4 text-white"><h2 class="font-bold text-lg">🕐 ¿A qué hora lo tomaste?</h2><p class="text-white/80">${m.nombre}</p></div><div class="p-6"><div class="flex justify-center mb-4"><input type="time" id="customTime" value="${U.time()}" class="text-3xl font-bold border-2 border-gray-200 rounded-xl p-3 text-center"></div><div class="flex flex-wrap gap-2 justify-center mb-4"><button onclick="document.getElementById('customTime').value='${U.toTime(U.parseT(U.time())-60)}'" class="px-3 py-1 bg-gray-100 rounded-full text-sm">Hace 1h</button><button onclick="document.getElementById('customTime').value='${U.toTime(U.parseT(U.time())-30)}'" class="px-3 py-1 bg-gray-100 rounded-full text-sm">Hace 30m</button><button onclick="document.getElementById('customTime').value='${U.toTime(U.parseT(U.time())-15)}'" class="px-3 py-1 bg-gray-100 rounded-full text-sm">Hace 15m</button><button onclick="document.getElementById('customTime').value='${U.time()}'" class="px-3 py-1 bg-gray-100 rounded-full text-sm">Ahora</button></div><div class="bg-blue-50 rounded-xl p-3 mb-4 text-center"><p class="text-sm text-blue-600">🔄 La próxima toma se recalculará automáticamente</p></div><div class="flex gap-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="takeMed('${m.id}',document.getElementById('customTime').value)" class="flex-1 bg-green-500 text-white py-3 rounded-xl font-bold">✅ Confirmar</button></div></div></div></div>`;
+    if(state.modal==='edit'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="${m.color||'bg-indigo-500'} p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">✏️ Editar medicamento</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><div><label class="block text-sm font-medium text-gray-700 mb-1">Nombre</label><input type="text" id="eNombre" value="${m.nombre}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Dosis</label><input type="text" id="eDosis" value="${m.dosis}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-medium text-gray-700 mb-1">Cada X horas</label><select id="eFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3">${[4,6,8,12,24].map(h=>`<option value="${h}" ${m.frecuencia===h?'selected':''}>${h} horas</option>`).join('')}</select></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Hora inicio</label><input type="time" id="eHora" value="${m.hora_inicio||'08:00'}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Días (0=indefinido)</label><input type="number" id="eDias" value="${m.dias||0}" min="0" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Notas</label><input type="text" id="eNotas" value="${m.notas||''}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div class="flex gap-2 pt-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="saveEdit()" class="flex-1 bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Guardar</button></div></div></div></div>`;
+    if(state.modal==='add')return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="bg-gradient-to-r from-green-500 to-emerald-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Añadir medicamento</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><div><label class="block text-sm font-medium text-gray-700 mb-1">Nombre *</label><input type="text" id="nNombre" placeholder="Ej: Paracetamol" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Dosis *</label><input type="text" id="nDosis" placeholder="Ej: 1g, 1 comprimido" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-medium text-gray-700 mb-1">Cada X horas</label><select id="nFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><option value="4">4 horas</option><option value="6">6 horas</option><option value="8" selected>8 horas</option><option value="12">12 horas</option><option value="24">24 horas</option></select></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Hora inicio</label><input type="time" id="nHora" value="08:00" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Días (0=indefinido)</label><input type="number" id="nDias" value="0" min="0" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Notas (opcional)</label><input type="text" id="nNotas" placeholder="Ej: Antes del desayuno" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"></div><div class="flex gap-2 pt-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="saveNew()" class="flex-1 bg-green-500 text-white py-3 rounded-xl font-bold">✅ Guardar</button></div></div></div></div>`;
+    if(state.modal==='camera')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">📷 Escanear Receta</h2><div class="w-8"></div></div><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="w-64 h-64 border-4 border-dashed border-white/40 rounded-3xl flex items-center justify-center mb-8"><div class="text-center"><span class="text-6xl">📄</span><p class="text-white/60 mt-4">Sube una foto de tu receta</p></div></div><button onclick="scanRecipe()" class="bg-white text-gray-800 px-10 py-4 rounded-full font-bold text-lg shadow-xl">📁 Seleccionar imagen</button><p class="text-white/50 text-sm mt-6 text-center">Gemini analizará la imagen y extraerá los medicamentos automáticamente</p></div></div>`;
+    if(state.modal==='ocr-results')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">Medicamentos detectados</h2><div class="w-8"></div></div><div class="flex-1 bg-white rounded-t-3xl mt-4 flex flex-col"><div class="p-4 border-b bg-green-50"><h3 class="font-bold text-lg text-green-700">✅ ${state.pendingOCR.length} medicamentos</h3><p class="text-sm text-green-600">Selecciona los que quieres añadir</p></div><div class="flex-1 overflow-y-auto p-4 space-y-2">${state.pendingOCR.map(med=>`<div onclick="toggleOCR(${med.id})" class="p-4 rounded-xl border-2 cursor-pointer ${med.checked?'border-green-500 bg-green-50':'border-gray-200'}"><div class="flex items-center gap-3"><div class="w-6 h-6 rounded-full border-2 flex items-center justify-center ${med.checked?'bg-green-500 border-green-500 text-white':'border-gray-300'}">${med.checked?'✓':''}</div><div class="flex-1"><h4 class="font-bold text-gray-800">${med.nombre}</h4><p class="text-sm text-gray-500">${med.dosis} • Cada ${med.frecuencia}h</p>${med.notas?`<p class="text-xs text-gray-400">📝 ${med.notas}</p>`:''}</div></div></div>`).join('')}</div><div class="p-4 border-t"><button onclick="confirmOCR()" class="w-full bg-gradient-to-r from-green-500 to-emerald-500 text-white py-4 rounded-xl font-bold text-lg">Añadir ${state.pendingOCR.filter(m=>m.checked).length} medicamentos</button></div></div></div>`;
+    return''
+}
+
+function renderAI(){
+    return`<div class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeAI()"><div class="bg-white rounded-3xl w-full max-w-sm overflow-hidden animate-slideUp"><div class="p-4 ${state.aiAdvice.type==='warning'?'bg-amber-500':'bg-gradient-to-r from-purple-500 to-pink-500'} text-white"><div class="flex items-center gap-2"><span class="text-2xl">🤖</span><h2 class="font-bold text-lg">${state.aiAdvice.title}</h2></div></div><div class="p-6"><p class="text-gray-700 leading-relaxed">${state.aiAdvice.msg}</p><div class="mt-4 bg-gray-50 rounded-xl p-3 text-xs text-gray-500">⚠️ Información orientativa. Consulta siempre con tu médico.</div><button onclick="closeAI()" class="w-full mt-4 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Entendido</button></div></div></div>`
+}
+
+// Init
+async function init(){
+    Cloud.init();DB.load();
+    if('Notification'in window&&Notification.permission==='granted')state.perms.notif=true;
+    render();
+    setTimeout(()=>{if(currentUser){state.screen='app';if(state.perms.notif)Notif.schedule()}else state.screen='permissions';render()},2000);
+    if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(console.error)
+}
+init();
+</script>
+</body>
+</html>
