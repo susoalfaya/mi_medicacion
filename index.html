@@ -7,22 +7,16 @@
     <meta name="theme-color" content="#6366f1">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    
     <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3063/3063176.png">
     <link rel="icon" type="image/png" href="https://cdn-icons-png.flaticon.com/512/3063/3063176.png">
-    
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    
     <style>
-        /* Estilos base para móvil */
         *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:0}
-        input,select,textarea{font-size:16px!important} /* Evita zoom en iPhone */
+        input,select,textarea{font-size:16px!important}
         .hide-scrollbar::-webkit-scrollbar{display:none}
         .hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}
-        
-        /* Animaciones */
         @keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
         @keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}
         @keyframes fadeIn{from{opacity:0}to{opacity:1}}
@@ -35,522 +29,326 @@
 </head>
 <body class="bg-gray-100">
 <div id="app"></div>
-
 <script>
 (function() {
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════════════
-//                    CONFIGURACIÓN - PEGA TUS DATOS AQUÍ
+//                    CONFIGURACIÓN - RELLENA ESTO DE NUEVO
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-    // 1. URL de tu proyecto Supabase (ej: https://xyz.supabase.co)
-    SUPABASE_URL: 'https://zahzgqzeiugjgfobdnzt.supabase.co',
+    // 1. URL de tu proyecto Supabase
+    SUPABASE_URL: 'TU_SUPABASE_URL_AQUI',
     
-    // 2. Tu clave pública "anon" (ej: eyJhbGc...)
-    SUPABASE_KEY: 'sb_publishable_c-4hRbM8ix-TMIqGLY5xQg_dDAGQlNG',
+    // 2. Tu clave pública "anon"
+    SUPABASE_KEY: 'TU_SUPABASE_KEY_AQUI',
     
-    // Configuración general
     AVISO_MINUTOS: 5
 };
 
-// Variables globales del estado de la app
+// Variables globales
 let sbClient = null;
 let currentUser = null;
 
-const state = {
-    screen: 'splash',
-    tab: 'home',
-    meds: [],
-    history: [],
-    modal: null,
-    selMed: null,
-    pendingOCR: [],
-    toast: null,
-    aiAdvice: null,
-    histFilter: { type: 'day', medId: null, date: new Date() },
-    perms: { camera: false, notif: false },
-    loading: false,
-    loadingMsg: 'Procesando...'
+const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false,loadingMsg:'Procesando...'};
+
+// Utilidades
+const U={
+    time:(d=new Date())=>d.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}),
+    date:(d=new Date())=>d.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),
+    dateISO:(d=new Date())=>d.toISOString().split('T')[0],
+    parseT:t=>{const[h,m]=t.split(':').map(Number);return h*60+m},
+    toTime:m=>`${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`,
+    nextDose:(from,freq)=>U.toTime((U.parseT(from)+freq*60)%(24*60)),
+    genId:()=>Date.now().toString(36)+Math.random().toString(36).substr(2),
+    toast:(msg,type='success')=>{state.toast={msg,type};render();setTimeout(()=>{state.toast=null;render()},3000)},
+    takenToday:id=>state.history.some(h=>h.med_id===id&&h.fecha.startsWith(U.dateISO())&&h.estado==='tomado')
 };
 
-// Utilidades de fecha y hora
-const U = {
-    time: (d = new Date()) => d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
-    date: (d = new Date()) => d.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }),
-    dateISO: (d = new Date()) => d.toISOString().split('T')[0],
-    parseT: t => { const [h, m] = t.split(':').map(Number); return h * 60 + m },
-    toTime: m => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`,
-    nextDose: (from, freq) => U.toTime((U.parseT(from) + freq * 60) % (24 * 60)),
-    genId: () => Date.now().toString(36) + Math.random().toString(36).substr(2),
-    toast: (msg, type = 'success') => { state.toast = { msg, type }; render(); setTimeout(() => { state.toast = null; render() }, 3000) },
-    takenToday: id => state.history.some(h => h.med_id === id && h.fecha.startsWith(U.dateISO()) && h.estado === 'tomado')
+// Base de datos local
+const DB={
+    get:k=>{try{const d=localStorage.getItem('med_'+k);return d?JSON.parse(d):null}catch{return null}},
+    set:(k,v)=>{try{localStorage.setItem('med_'+k,JSON.stringify(v))}catch(e){console.error('Error local:',e)}},
+    load:()=>{state.meds=DB.get('meds')||[];state.history=DB.get('history')||[];currentUser=DB.get('user')},
+    save:()=>{DB.set('meds',state.meds);DB.set('history',state.history);if(currentUser)DB.set('user',currentUser)}
 };
 
-// Base de datos local (localStorage) para funcionamiento offline
-const DB = {
-    get: k => { try { const d = localStorage.getItem('med_' + k); return d ? JSON.parse(d) : null } catch { return null } },
-    set: (k, v) => { try { localStorage.setItem('med_' + k, JSON.stringify(v)) } catch (e) { console.error('Error guardando local:', e) } },
-    load: () => { state.meds = DB.get('meds') || []; state.history = DB.get('history') || []; currentUser = DB.get('user') },
-    save: () => { DB.set('meds', state.meds); DB.set('history', state.history); if (currentUser) DB.set('user', currentUser) }
-};
-
-// Lógica de Nube (Supabase)
-const Cloud = {
-    async init() {
-        if (!window.supabase || !window.supabase.createClient) {
-            console.warn('Supabase no disponible'); return;
-        }
-        try {
+// Supabase
+const Cloud={
+    async init(){
+        if(!window.supabase){console.warn('Supabase off');return;}
+        try{
             sbClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
             console.log('✅ Supabase inicializado');
-            
-            // Comprobar sesión existente
-            const { data: { session } } = await sbClient.auth.getSession();
-            if (session?.user) {
-                currentUser = { id: session.user.id, email: session.user.email };
+            const {data:{session}} = await sbClient.auth.getSession();
+            if(session?.user){
+                currentUser = {id: session.user.id, email: session.user.email};
                 DB.set('user', currentUser);
                 await Cloud.loadData();
             }
-        } catch (e) {
-            console.error('Error inicializando Supabase:', e);
-        }
+        }catch(e){console.error('Error init:',e)}
     },
-    
-    async login(email, pwd) {
-        if (!sbClient) return { error: { message: 'Conexión no disponible' } };
-        try {
-            // Intentar login
-            let { data, error } = await sbClient.auth.signInWithPassword({ email, password: pwd });
-            
-            // Si falla el login, intentamos registrar (Sign Up) automáticamente para facilitar uso
-            if (error && (error.message.includes('Invalid login') || error.message.includes('not found'))) {
-                console.log('Usuario no encontrado, intentando registro...');
-                const res = await sbClient.auth.signUp({ email, password: pwd });
-                data = res.data; error = res.error;
-                if (!error && data.user) U.toast('Cuenta creada con éxito', 'success');
+    async login(email,pwd){
+        if(!sbClient) return{error:{message:'Error conexión'}};
+        try{
+            let{data,error}=await sbClient.auth.signInWithPassword({email,password:pwd});
+            if(error && (error.message.includes('Invalid')||error.message.includes('not found'))){
+                const res = await sbClient.auth.signUp({email,password:pwd});
+                data=res.data; error=res.error;
+                if(!error && data.user) U.toast('Cuenta creada','success');
             }
-            
-            if (!error && data.user) {
-                currentUser = { id: data.user.id, email: data.user.email };
-                DB.set('user', currentUser);
+            if(!error && data.user){
+                currentUser={id:data.user.id,email:data.user.email};
+                DB.set('user',currentUser);
                 await Cloud.loadData();
             }
-            return { data, error }
-        } catch (e) {
-            return { error: { message: e.message || 'Error de conexión' } }
-        }
+            return{data,error}
+        }catch(e){return{error:{message:e.message}}}
     },
-    
-    async loadData() {
-        if (!sbClient || !currentUser || currentUser.id === 'local') return;
-        try {
-            const { data: m } = await sbClient.from('medicamentos').select('*').eq('activo', true);
-            const { data: h } = await sbClient.from('historial').select('*').order('created_at', { ascending: false }).limit(100);
-            
-            if (m) { state.meds = m; }
-            if (h) { state.history = h; }
+    async loadData(){
+        if(!sbClient||!currentUser||currentUser.id==='local') return;
+        try{
+            const{data:m}=await sbClient.from('medicamentos').select('*').eq('activo',true);
+            const{data:h}=await sbClient.from('historial').select('*').order('created_at',{ascending:false}).limit(100);
+            if(m) state.meds=m;
+            if(h) state.history=h;
             DB.save();
-        } catch (e) { console.error('Error sync:', e); }
+        }catch(e){console.error('Sync error:',e)}
     },
-    
-    async saveMed(med) {
+    async saveMed(med){
         DB.save();
-        if (!sbClient || !currentUser || currentUser.id === 'local') return;
-        try { await sbClient.from('medicamentos').upsert({ ...med, user_id: currentUser.id }); } catch (e) { console.error(e) }
+        if(!sbClient||!currentUser||currentUser.id==='local') return;
+        try{await sbClient.from('medicamentos').upsert({...med, user_id:currentUser.id})}catch(e){}
     },
-    
-    async saveHist(e) {
+    async saveHist(e){
         DB.save();
-        if (!sbClient || !currentUser || currentUser.id === 'local') return;
-        try { await sbClient.from('historial').insert({ ...e, user_id: currentUser.id }); } catch (e) { console.error(e) }
+        if(!sbClient||!currentUser||currentUser.id==='local') return;
+        try{await sbClient.from('historial').insert({...e, user_id:currentUser.id})}catch(e){}
     },
-    
-    async logout() {
-        try { if (sbClient) await sbClient.auth.signOut(); } catch (e) {}
-        localStorage.clear();
-        location.reload();
+    async logout(){
+        try{if(sbClient)await sbClient.auth.signOut()}catch(e){}
+        localStorage.clear(); location.reload();
     }
 };
 
-// Lógica IA (Segura con Edge Function)
-const Gemini = {
+// IA con limpieza de JSON (VERSIÓN CORREGIDA)
+const Gemini={
     async analyze(b64){
-        if(!sbClient){
-            U.toast('Necesitas conexión para analizar recetas','error');
-            return [];
-        }
-
-        console.log('📡 Contactando con Supabase Edge Function...');
-        
+        if(!sbClient){U.toast('Sin conexión','error');return[];}
+        console.log('📡 Enviando a Supabase...');
         try{
-            // Llamada a la función
             const { data, error } = await sbClient.functions.invoke('analizar-receta', {
                 body: { image: b64 }
             });
 
-            if(error){
-                console.error('Error Edge Function:', error);
-                throw new Error('Error en la nube: ' + error.message);
-            }
-
+            if(error) throw new Error(error.message);
+            
             console.log('📥 Respuesta cruda:', data);
-
-            // 1. Extraer el texto de la respuesta de Google
+            
+            // 1. Extraer texto
             let txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            
-            if (!txt) {
-                console.error('Estructura inesperada:', data);
-                throw new Error('La IA no devolvió texto legible');
-            }
+            if(!txt) throw new Error('Respuesta vacía de la IA');
 
-            console.log('📝 Texto de la IA:', txt);
-            
-            // 2. LIMPIEZA AGRESIVA (La parte nueva)
-            // Buscamos dónde empieza el primer corchete '[' y dónde acaba el último ']'
-            const firstBracket = txt.indexOf('[');
-            const lastBracket = txt.lastIndexOf(']');
-            
-            if (firstBracket !== -1 && lastBracket !== -1) {
-                // Nos quedamos solo con lo que hay entre corchetes
-                txt = txt.substring(firstBracket, lastBracket + 1);
+            // 2. Limpiar JSON (Buscar corchetes)
+            const first = txt.indexOf('[');
+            const last = txt.lastIndexOf(']');
+            if(first !== -1 && last !== -1){
+                txt = txt.substring(first, last+1);
             } else {
-                throw new Error('No se encontró una lista JSON en la respuesta');
+                throw new Error('No se encontraron medicamentos');
             }
 
             // 3. Parsear
-            let medicamentos = [];
-            try {
-                medicamentos = JSON.parse(txt);
-            } catch(parseError) {
-                console.error('Falló el JSON.parse con este texto:', txt);
-                throw new Error('El formato de la IA no es válido');
-            }
+            const json = JSON.parse(txt);
             
-            // 4. Validar datos
-            const medsValidos = (Array.isArray(medicamentos) ? medicamentos : [])
+            // 4. Validar
+            const meds = (Array.isArray(json)?json:[])
                 .filter(m => m && m.nombre)
                 .map(m => ({
-                    nombre: String(m.nombre || '').trim(),
-                    dosis: String(m.dosis || 'Según pauta').trim(),
-                    frecuencia: parseInt(m.frecuencia) || 8,
-                    dias: parseInt(m.dias) || 0,
-                    notas: String(m.notas || '').trim()
+                    nombre: String(m.nombre||'').trim(),
+                    dosis: String(m.dosis||'Según pauta').trim(),
+                    frecuencia: parseInt(m.frecuencia)||8,
+                    dias: parseInt(m.dias)||0,
+                    notas: String(m.notas||'').trim()
                 }));
-            
-            if(medsValidos.length === 0) U.toast('No se detectaron medicamentos claros','warning');
-            return medsValidos;
-            
+
+            if(meds.length===0) U.toast('No se leyeron medicamentos','warning');
+            return meds;
+
         }catch(e){
-            console.error('Error total:', e);
-            // Mostramos el error en pantalla para que sepas qué pasa
-            U.toast(e.message, 'error');
+            console.error(e);
+            U.toast('Error al leer receta','error');
             return [];
         }
     },
-        if (!sbClient) {
-            U.toast('Necesitas conexión para analizar recetas', 'error');
-            return [];
-        }
-
-        console.log('📡 Contactando con Supabase Edge Function...');
-        
-        try {
-            // Llamamos a la función segura en la nube
-            // Aquí NO hay prompt visible, está en el servidor
-            const { data, error } = await sbClient.functions.invoke('analizar-receta', {
-                body: { image: b64 }
-            });
-
-            if (error) {
-                console.error('Error Edge Function:', error);
-                throw error;
-            }
-
-            console.log('📥 Respuesta recibida:', data);
-            
-            // Procesar respuesta JSON que viene de la IA
-            let txt = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            
-            // Limpieza básica por si la IA devuelve Markdown
-            txt = txt.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
-            const jsonMatch = txt.match(/\[[\s\S]*\]/);
-            if (jsonMatch) txt = jsonMatch[0];
-
-            let medicamentos = [];
-            try {
-                medicamentos = JSON.parse(txt);
-            } catch (parseError) {
-                console.error('Error parseando JSON:', txt);
-                return [];
-            }
-            
-            // Validar que los datos tengan la forma correcta
-            const medsValidos = (Array.isArray(medicamentos) ? medicamentos : [])
-                .filter(m => m && m.nombre)
-                .map(m => ({
-                    nombre: String(m.nombre || '').trim(),
-                    dosis: String(m.dosis || 'Según pauta').trim(),
-                    frecuencia: parseInt(m.frecuencia) || 8,
-                    dias: parseInt(m.dias) || 0,
-                    notas: String(m.notas || '').trim()
-                }));
-            
-            if (medsValidos.length === 0) U.toast('No se detectaron medicamentos', 'error');
-            return medsValidos;
-            
-        } catch (e) {
-            console.error('Error total:', e);
-            U.toast('Error al analizar imagen. Verifica tu conexión.', 'error');
-            return [];
-        }
-    },
-    
-    async advice(ctx, action) {
-        // Consejos simples predefinidos para rapidez
-        const consejos = {
-            skip: 'Has saltado una toma. Si es habitual, consulta a tu médico.',
-            late: 'Toma registrada tarde. La siguiente se ha recalculado.',
-            edit: 'Cambios guardados. Sigue siempre la receta oficial.'
-        };
-        return consejos[action] || '';
+    async advice(ctx,action){
+        return {skip:'Saltado',late:'Tarde',edit:'Editado'}[action]||'';
     }
 };
 
 // Notificaciones
-const Notif = {
-    async request() {
-        if (!('Notification' in window)) { U.toast('No soportado', 'error'); return false }
-        const p = await Notification.requestPermission();
-        state.perms.notif = p === 'granted';
-        if (p === 'granted') { Notif.schedule(); U.toast('✅ Avisos activados') }
+const Notif={
+    async request(){
+        if(!('Notification'in window)){U.toast('No soportado','error');return}
+        const p=await Notification.requestPermission();
+        state.perms.notif=p==='granted';
+        if(state.perms.notif){Notif.schedule();U.toast('✅ Avisos activados')}
         render();
     },
-    schedule() { setInterval(Notif.check, 60000); Notif.check() },
-    check() {
-        if (!state.perms.notif) return;
-        const now = U.parseT(U.time());
-        state.meds.forEach(m => {
-            if (!m.activo) return;
-            const t = U.parseT(m.proxima_toma), diff = t - now;
-            if (diff === CONFIG.AVISO_MINUTOS) Notif.send(`⏰ ${m.nombre} en ${CONFIG.AVISO_MINUTOS} min`, m.dosis);
-            if (diff === 0) Notif.send(`💊 ¡Hora de ${m.nombre}!`, `Toma ${m.dosis} ahora`)
+    schedule(){setInterval(Notif.check,60000);Notif.check()},
+    check(){
+        if(!state.perms.notif)return;
+        const now=U.parseT(U.time());
+        state.meds.forEach(m=>{
+            if(!m.activo)return;
+            const t=U.parseT(m.proxima_toma),diff=t-now;
+            if(diff===CONFIG.AVISO_MINUTOS)Notif.send(`⏰ ${m.nombre} en ${CONFIG.AVISO_MINUTOS} min`,m.dosis);
+            if(diff===0)Notif.send(`💊 ¡Hora de ${m.nombre}!`,`Toma ${m.dosis} ahora`)
         })
     },
-    send: (title, body) => {
-        if (Notification.permission === 'granted') new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/3063/3063176.png', tag: 'med', renotify: true })
+    send:(title,body)=>{
+        if(Notification.permission==='granted')new Notification(title,{body,icon:'https://cdn-icons-png.flaticon.com/512/3063/3063176.png',tag:'med'})
     }
 };
 
-// Cámara y Archivos
-const Cam = {
-    async capture() {
-        return new Promise(res => {
-            const inp = document.createElement('input');
-            inp.type = 'file'; inp.accept = 'image/*'; inp.capture = 'environment';
-            inp.onchange = e => {
-                const f = e.target.files[0]; if (!f) return res(null);
-                const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.readAsDataURL(f)
-            };
+// Cámara
+const Cam={
+    async capture(){
+        return new Promise(res=>{
+            const inp=document.createElement('input');
+            inp.type='file'; inp.accept='image/*'; inp.capture='environment';
+            inp.onchange=e=>{const f=e.target.files[0];const r=new FileReader();r.onload=()=>res(r.result?.split(',')[1]);if(f)r.readAsDataURL(f);else res(null)};
             inp.click()
         })
     },
-    async select() {
-        return new Promise(res => {
-            const inp = document.createElement('input');
-            inp.type = 'file'; inp.accept = 'image/*';
-            inp.onchange = e => {
-                const f = e.target.files[0]; if (!f) return res(null);
-                const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.readAsDataURL(f)
-            };
+    async select(){
+        return new Promise(res=>{
+            const inp=document.createElement('input');
+            inp.type='file'; inp.accept='image/*';
+            inp.onchange=e=>{const f=e.target.files[0];const r=new FileReader();r.onload=()=>res(r.result?.split(',')[1]);if(f)r.readAsDataURL(f);else res(null)};
             inp.click()
         })
     }
 };
 
-// Acciones principales (Lógica de negocio)
-const Act = {
-    async take(med, time = null) {
-        const hr = time || U.time(), prox = U.nextDose(hr, med.frecuencia);
-        const i = state.meds.findIndex(m => m.id === med.id);
-        if (i !== -1) { state.meds[i].proxima_toma = prox; Cloud.saveMed(state.meds[i]) }
-        const e = { id: U.genId(), med_id: med.id, nombre: med.nombre, hora_programada: med.proxima_toma, hora_real: hr, estado: 'tomado', proxima_recalculada: prox, fecha: new Date().toISOString(), created_at: new Date().toISOString() };
-        state.history.unshift(e); Cloud.saveHist(e);
-        state.modal = null; state.selMed = null; U.toast(`✅ ${med.nombre} registrado. Próxima: ${prox}`);
-        if (hr !== med.proxima_toma) { const a = await Gemini.advice({}, 'late'); if (a) setTimeout(() => { state.aiAdvice = { title: '💡 Consejo', msg: a, type: 'info' }; render() }, 1000) }
-        render()
+// Acciones
+const Act={
+    take(med,time=null){
+        const hr=time||U.time(),prox=U.nextDose(hr,med.frecuencia);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=prox;Cloud.saveMed(state.meds[i])}
+        const e={id:U.genId(),med_id:med.id,nombre:med.nombre,hora_programada:med.proxima_toma,hora_real:hr,estado:'tomado',proxima_recalculada:prox,fecha:new Date().toISOString(),created_at:new Date().toISOString()};
+        state.history.unshift(e);Cloud.saveHist(e);
+        state.modal=null;U.toast(`✅ ${med.nombre} registrado`);render()
     },
-    async skip(med) {
-        const prox = U.nextDose(U.time(), med.frecuencia);
-        const i = state.meds.findIndex(m => m.id === med.id);
-        if (i !== -1) { state.meds[i].proxima_toma = prox; Cloud.saveMed(state.meds[i]) }
-        const e = { id: U.genId(), med_id: med.id, nombre: med.nombre, hora_programada: med.proxima_toma, hora_real: '-', estado: 'saltado', proxima_recalculada: prox, fecha: new Date().toISOString(), created_at: new Date().toISOString() };
-        state.history.unshift(e); Cloud.saveHist(e);
-        state.modal = null;
-        const skipped = state.history.filter(h => h.med_id === med.id && h.estado === 'saltado').length;
-        if (skipped >= 2) { const a = await Gemini.advice({}, 'skip'); if (a) state.aiAdvice = { title: '⚠️ Atención', msg: a, type: 'warning' } }
-        render()
+    skip(med){
+        const prox=U.nextDose(U.time(),med.frecuencia);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=prox;Cloud.saveMed(state.meds[i])}
+        const e={id:U.genId(),med_id:med.id,nombre:med.nombre,hora_programada:med.proxima_toma,hora_real:'-',estado:'saltado',proxima_recalculada:prox,fecha:new Date().toISOString(),created_at:new Date().toISOString()};
+        state.history.unshift(e);Cloud.saveHist(e);
+        state.modal=null;render()
     },
-    postpone(med, mins) {
-        const nt = U.toTime(U.parseT(U.time()) + mins);
-        const i = state.meds.findIndex(m => m.id === med.id);
-        if (i !== -1) { state.meds[i].proxima_toma = nt; Cloud.saveMed(state.meds[i]) }
-        state.modal = null; U.toast(`⏰ Recordatorio a las ${nt}`); render()
+    postpone(med,mins){
+        const nt=U.toTime(U.parseT(U.time())+mins);
+        const i=state.meds.findIndex(m=>m.id===med.id);
+        if(i!==-1){state.meds[i].proxima_toma=nt;Cloud.saveMed(state.meds[i])}
+        state.modal=null;U.toast(`⏰ Postergado a las ${nt}`);render()
     },
-    add(m) {
-        const nm = { id: U.genId(), nombre: m.nombre, dosis: m.dosis, frecuencia: m.frecuencia || 8, hora_inicio: m.horaInicio || '08:00', proxima_toma: U.nextDose(m.horaInicio || '08:00', m.frecuencia || 8), dias: m.dias || 0, notas: m.notas || '', activo: true, fecha_inicio: U.dateISO(), color: ['bg-purple-500', 'bg-blue-500', 'bg-green-500', 'bg-orange-500', 'bg-pink-500', 'bg-cyan-500'][state.meds.length % 6] };
-        state.meds.push(nm); Cloud.saveMed(nm); return nm
+    add(m){
+        const nm={id:U.genId(),nombre:m.nombre,dosis:m.dosis,frecuencia:m.frecuencia||8,hora_inicio:m.horaInicio||'08:00',proxima_toma:U.nextDose(m.horaInicio||'08:00',m.frecuencia||8),dias:m.dias||0,notas:m.notas||'',activo:true,fecha_inicio:U.dateISO(),color:['bg-purple-500','bg-blue-500','bg-green-500','bg-orange-500','bg-pink-500','bg-cyan-500'][state.meds.length%6]};
+        state.meds.push(nm);Cloud.saveMed(nm);return nm
     },
-    async update(id, upd) {
-        const i = state.meds.findIndex(m => m.id === id); if (i === -1) return;
-        const old = { ...state.meds[i] }; state.meds[i] = { ...old, ...upd };
-        if (upd.frecuencia && upd.frecuencia !== old.frecuencia) state.meds[i].proxima_toma = U.nextDose(upd.hora_inicio || old.hora_inicio, upd.frecuencia);
-        Cloud.saveMed(state.meds[i]);
-        state.modal = null; U.toast('✅ Actualizado'); render()
+    update(id,upd){
+        const i=state.meds.findIndex(m=>m.id===id);if(i===-1)return;
+        const old={...state.meds[i]};state.meds[i]={...old,...upd};
+        if(upd.frecuencia&&upd.frecuencia!==old.frecuencia)state.meds[i].proxima_toma=U.nextDose(upd.hora_inicio||old.hora_inicio,upd.frecuencia);
+        Cloud.saveMed(state.meds[i]);state.modal=null;U.toast('✅ Actualizado');render()
     },
-    del(id) {
-        if (!confirm('¿Eliminar este medicamento?')) return;
-        const i = state.meds.findIndex(m => m.id === id);
-        if (i !== -1) { state.meds[i].activo = false; Cloud.saveMed(state.meds[i]) }
-        state.meds = state.meds.filter(m => m.activo !== false); DB.save();
-        state.modal = null; U.toast('🗑️ Eliminado'); render()
+    del(id){
+        if(!confirm('¿Eliminar?'))return;
+        const i=state.meds.findIndex(m=>m.id===id);
+        if(i!==-1){state.meds[i].activo=false;Cloud.saveMed(state.meds[i])}
+        state.meds=state.meds.filter(m=>m.activo!==false);DB.save();
+        state.modal=null;render()
     },
-    async ocr(b64) {
-        state.loading = true; state.loadingMsg = '🔍 Analizando receta en la nube...'; render();
-        const ms = await Gemini.analyze(b64);
-        state.loading = false;
-        if (ms.length > 0) {
-            state.pendingOCR = ms.map((m, i) => ({ ...m, checked: true, id: i }));
-            state.modal = 'ocr-results';
-        }
+    async ocr(b64){
+        state.loading=true;state.loadingMsg='🔍 Analizando...';render();
+        const ms=await Gemini.analyze(b64);
+        state.loading=false;
+        if(ms.length>0){state.pendingOCR=ms.map((m,i)=>({...m,checked:true,id:i}));state.modal='ocr-results'}
         render();
     },
-    confirmOCR() {
-        const sel = state.pendingOCR.filter(m => m.checked);
-        sel.forEach(m => Act.add(m));
-        state.pendingOCR = []; state.modal = null; U.toast(`✅ ${sel.length} añadidos`); render()
+    confirmOCR(){
+        state.pendingOCR.filter(m=>m.checked).forEach(m=>Act.add(m));
+        state.pendingOCR=[];state.modal=null;U.toast('✅ Medicamentos añadidos');render()
     },
-    filteredHist() {
-        let f = [...state.history]; const fl = state.histFilter;
-        if (fl.medId) f = f.filter(h => h.med_id === fl.medId);
-        if (fl.type === 'day') { const d = U.dateISO(fl.date); f = f.filter(h => h.fecha.startsWith(d)) }
-        else if (fl.type === 'week') { const ws = new Date(fl.date); ws.setDate(ws.getDate() - ws.getDay()); const we = new Date(ws); we.setDate(we.getDate() + 7); f = f.filter(h => { const d = new Date(h.fecha); return d >= ws && d < we }) }
+    filteredHist(){
+        let f=[...state.history];const fl=state.histFilter;
+        if(fl.medId)f=f.filter(h=>h.med_id===fl.medId);
+        if(fl.type==='day'){const d=U.dateISO(fl.date);f=f.filter(h=>h.fecha.startsWith(d))}
+        else if(fl.type==='week'){const ws=new Date(fl.date);ws.setDate(ws.getDate()-ws.getDay());const we=new Date(ws);we.setDate(we.getDate()+7);f=f.filter(h=>{const d=new Date(h.fecha);return d>=ws&&d<we})}
         return f
     }
 };
 
-// Global Handlers (Conectan el HTML con el JS)
-window.setTab = t => { state.tab = t; render() };
-window.openModal = (m, medId = null) => { state.modal = m; state.selMed = medId ? state.meds.find(x => x.id === medId) : null; render() };
-window.closeModal = () => { state.modal = null; state.selMed = null; state.pendingOCR = []; render() };
-window.closeAI = () => { state.aiAdvice = null; render() };
-window.takeMed = (id, t = null) => { const m = state.meds.find(x => x.id === id); if (m) Act.take(m, t) };
-window.skipMed = id => { const m = state.meds.find(x => x.id === id); if (m) Act.skip(m) };
-window.postponeMed = (id, mins) => { const m = state.meds.find(x => x.id === id); if (m) Act.postpone(m, mins) };
-window.delMed = id => Act.del(id);
-window.toggleOCR = id => { const i = state.pendingOCR.findIndex(m => m.id === id); if (i !== -1) { state.pendingOCR[i].checked = !state.pendingOCR[i].checked; render() } };
-window.confirmOCR = () => Act.confirmOCR();
-window.scanRecipe = async () => { const b = await Cam.select(); if (b) await Act.ocr(b) };
-window.captureRecipe = async () => { const b = await Cam.capture(); if (b) await Act.ocr(b) };
-window.setHistFilter = t => { state.histFilter.type = t; render() };
-window.setHistMed = id => { state.histFilter.medId = id || null; render() };
-window.setHistDate = o => { const d = new Date(state.histFilter.date); d.setDate(d.getDate() + o); state.histFilter.date = d; render() };
-window.reqNotif = () => Notif.request();
-window.reqCam = async () => { try { const s = await navigator.mediaDevices.getUserMedia({ video: true }); s.getTracks().forEach(t => t.stop()); state.perms.camera = true; render() } catch (e) { console.error(e) } };
-window.goLogin = () => { state.screen = 'login'; render() };
-window.skipPerms = () => { state.screen = 'login'; render() };
-window.doLogin = async () => {
-    const e = document.getElementById('email')?.value, p = document.getElementById('pwd')?.value;
-    if (!e || !p) { U.toast('Introduce email y contraseña', 'error'); return }
-    state.loading = true; render();
-    const { error } = await Cloud.login(e, p);
-    state.loading = false;
-    if (error) U.toast(error.message, 'error'); else { state.screen = 'app'; render() }
+// UI Handlers
+window.setTab=t=>{state.tab=t;render()};
+window.openModal=(m,id=null)=>{state.modal=m;state.selMed=id?state.meds.find(x=>x.id===id):null;render()};
+window.closeModal=()=>{state.modal=null;state.selMed=null;state.pendingOCR=[];render()};
+window.closeAI=()=>{state.aiAdvice=null;render()};
+window.takeMed=(id,t)=>Act.take(state.meds.find(x=>x.id===id),t);
+window.skipMed=id=>Act.skip(state.meds.find(x=>x.id===id));
+window.delMed=id=>Act.del(id);
+window.toggleOCR=id=>{const i=state.pendingOCR.findIndex(m=>m.id===id);if(i!==-1){state.pendingOCR[i].checked=!state.pendingOCR[i].checked;render()}};
+window.confirmOCR=()=>Act.confirmOCR();
+window.scanRecipe=async()=>{const b=await Cam.select();if(b)Act.ocr(b)};
+window.captureRecipe=async()=>{const b=await Cam.capture();if(b)Act.ocr(b)};
+window.setHistFilter=t=>{state.histFilter.type=t;render()};
+window.reqNotif=()=>Notif.request();
+window.reqCam=async()=>{try{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(t=>t.stop());state.perms.camera=true;render()}catch{}};
+window.goLogin=()=>{state.screen='login';render()};
+window.doLogin=async()=>{
+    const e=document.getElementById('email')?.value,p=document.getElementById('pwd')?.value;
+    if(!e||!p)return U.toast('Faltan datos','error');
+    state.loading=true;render();
+    const{error}=await Cloud.login(e,p);
+    state.loading=false;
+    if(error)U.toast(error.message,'error');else{state.screen='app';render()}
 };
-window.offlineMode = () => { currentUser = { id: 'local', email: 'Modo Local' }; DB.set('user', currentUser); state.screen = 'app'; render() };
-window.logout = () => Cloud.logout();
-window.saveEdit = () => { const f = { nombre: document.getElementById('eNombre')?.value, dosis: document.getElementById('eDosis')?.value, frecuencia: parseInt(document.getElementById('eFrec')?.value) || 8, hora_inicio: document.getElementById('eHora')?.value, dias: parseInt(document.getElementById('eDias')?.value) || 0, notas: document.getElementById('eNotas')?.value || '' }; if (!f.nombre) return; Act.update(state.selMed.id, f) };
-window.saveNew = () => { const f = { nombre: document.getElementById('nNombre')?.value, dosis: document.getElementById('nDosis')?.value, frecuencia: parseInt(document.getElementById('nFrec')?.value) || 8, horaInicio: document.getElementById('nHora')?.value || '08:00', dias: parseInt(document.getElementById('nDias')?.value) || 0, notas: document.getElementById('nNotas')?.value || '' }; if (!f.nombre) return; Act.add(f); state.modal = null; U.toast('✅ Medicamento añadido'); render() };
+window.offlineMode=()=>{currentUser={id:'local',email:'Local'};DB.set('user',currentUser);state.screen='app';render()};
+window.logout=()=>Cloud.logout();
+window.saveEdit=()=>{const f={nombre:document.getElementById('eNombre').value,dosis:document.getElementById('eDosis').value,frecuencia:parseInt(document.getElementById('eFrec').value)||8,hora_inicio:document.getElementById('eHora').value,notas:document.getElementById('eNotas').value};Act.update(state.selMed.id,f)};
+window.saveNew=()=>{const f={nombre:document.getElementById('nNombre').value,dosis:document.getElementById('nDosis').value,frecuencia:parseInt(document.getElementById('nFrec').value)||8,horaInicio:document.getElementById('nHora').value,notas:document.getElementById('nNotas').value};Act.add(f);state.modal=null;U.toast('Añadido')};
 
-// Funciones de Renderizado (Pintan la pantalla)
-function render() {
-    const $ = document.getElementById('app');
-    if (state.screen === 'splash') { $.innerHTML = renderSplash(); return }
-    if (state.screen === 'permissions') { $.innerHTML = renderPerms(); return }
-    if (state.screen === 'login') { $.innerHTML = renderLogin(); return }
-    $.innerHTML = renderApp()
+// Render
+function render(){
+    const $=document.getElementById('app');
+    if(state.screen==='splash'){$.innerHTML=`<div class="h-screen bg-indigo-600 flex items-center justify-center text-white text-4xl">💊</div>`;return}
+    if(state.screen==='login'){$.innerHTML=renderLogin();return}
+    $.innerHTML=renderApp()
 }
-
-function renderSplash() {
-    return `<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col items-center justify-center"><div class="text-8xl mb-6">💊</div><h1 class="text-white text-3xl font-bold mb-2">Mi Medicación</h1><p class="text-white/70">Cargando...</p></div>`
-}
-
-function renderPerms() {
-    return `<div class="h-screen bg-gray-50 flex flex-col"><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="text-6xl mb-6">🔐</div><h1 class="text-2xl font-bold text-gray-800 mb-2">Bienvenido</h1><p class="text-gray-500 text-center mb-8">Necesitamos algunos permisos para funcionar:</p><div class="w-full max-w-sm space-y-4"><div class="p-4 rounded-2xl border-2 ${state.perms.camera ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white'}"><div class="flex items-center gap-4"><div class="w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${state.perms.camera ? 'bg-green-500 text-white' : 'bg-gray-100'}">${state.perms.camera ? '✓' : '📷'}</div><div class="flex-1"><h3 class="font-bold text-gray-800">Cámara</h3></div>${!state.perms.camera ? '<button onclick="reqCam()" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">Activar</button>' : ''}</div></div><div class="p-4 rounded-2xl border-2 ${state.perms.notif ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white'}"><div class="flex items-center gap-4"><div class="w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${state.perms.notif ? 'bg-green-500 text-white' : 'bg-gray-100'}">${state.perms.notif ? '✓' : '🔔'}</div><div class="flex-1"><h3 class="font-bold text-gray-800">Avisos</h3></div>${!state.perms.notif ? '<button onclick="reqNotif()" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">Activar</button>' : ''}</div></div></div></div><div class="p-6"><button onclick="goLogin()" class="w-full py-4 rounded-2xl font-bold text-lg bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg">Continuar</button></div></div>`
-}
-
-function renderLogin() {
-    return `<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col"><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="text-7xl mb-6">💊</div><h1 class="text-white text-3xl font-bold mb-2">Mi Medicación</h1><p class="text-white/70 mb-10">Crea tu cuenta o inicia sesión</p><div class="w-full max-w-sm space-y-4"><input id="email" type="email" placeholder="tu@email.com" class="w-full bg-white/20 backdrop-blur text-white placeholder-white/50 rounded-2xl px-4 py-4 outline-none"><input id="pwd" type="password" placeholder="Contraseña" class="w-full bg-white/20 backdrop-blur text-white placeholder-white/50 rounded-2xl px-4 py-4 outline-none"><button onclick="doLogin()" class="w-full bg-white text-indigo-600 py-4 rounded-2xl font-bold text-lg shadow-lg">${state.loading ? 'Entrando...' : 'Entrar / Registrarse'}</button><button onclick="offlineMode()" class="w-full text-white/70 py-3 text-sm">Probar sin cuenta</button></div></div></div>`
-}
-
-function renderApp() {
-    const pend = state.meds.filter(m => m.activo && !U.takenToday(m.id)), comp = state.meds.filter(m => m.activo && U.takenToday(m.id)), prog = state.meds.filter(m => m.activo).length > 0 ? Math.round(comp.length / state.meds.filter(m => m.activo).length * 100) : 0, now = U.time(), date = U.date();
-    let content = '';
-    if (state.tab === 'home') content = renderHome(pend, comp, prog, now, date);
-    else if (state.tab === 'meds') content = renderMeds();
-    else if (state.tab === 'history') content = renderHistory();
-    else if (state.tab === 'profile') content = renderProfile();
-    return `<div class="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative"><div class="flex-1 overflow-y-auto pb-20 hide-scrollbar">${content}</div><div class="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg max-w-md mx-auto"><div class="flex justify-around py-2">${['home', 'meds', 'history', 'profile'].map(t => `<button onclick="setTab('${t}')" class="flex flex-col items-center py-2 px-4 rounded-xl ${state.tab === t ? 'text-indigo-600 bg-indigo-50' : 'text-gray-400'}"><span class="text-xl">${{ home: '🏠', meds: '💊', history: '📊', profile: '👤' }[t]}</span><span class="text-xs mt-1">${{ home: 'Inicio', meds: 'Medicinas', history: 'Historial', profile: 'Perfil' }[t]}</span></button>`).join('')}</div></div>${state.modal ? renderModal() : ''}${state.aiAdvice ? renderAI() : ''}${state.toast ? `<div class="fixed top-4 left-4 right-4 z-50 max-w-md mx-auto animate-slideDown"><div class="${state.toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} text-white p-4 rounded-2xl shadow-xl flex items-center gap-3"><span class="text-xl">${state.toast.type === 'success' ? '✓' : '!'}</span><p class="font-medium">${state.toast.msg}</p></div></div>` : ''}${state.loading ? `<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div class="bg-white rounded-2xl p-6 flex flex-col items-center"><div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div><p class="text-gray-600">${state.loadingMsg}</p></div></div>` : ''}</div>`
-}
-
-function renderHome(pend, comp, prog, now, date) {
-    return `<div class="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white p-5 rounded-b-3xl"><div class="flex justify-between items-start mb-3"><div><p class="text-purple-200 text-sm">Buenos días 👋</p><h1 class="text-2xl font-bold">Mi Medicación</h1></div><div class="text-right"><p class="text-3xl font-bold">${now}</p><p class="text-purple-200 text-xs capitalize">${date}</p></div></div><div class="bg-white/20 backdrop-blur rounded-2xl p-4 mt-2"><div class="flex justify-between items-center mb-2"><span class="text-sm">Progreso</span><span class="font-bold">${comp.length}/${state.meds.filter(m => m.activo).length}</span></div><div class="h-3 bg-white/30 rounded-full overflow-hidden"><div class="h-full bg-white rounded-full transition-all" style="width:${prog}%"></div></div></div>${pend.length > 0 && pend[0].proxima_toma ? `<div class="mt-3 bg-yellow-400 text-yellow-900 rounded-xl p-3 flex items-center gap-3"><span class="text-2xl">⏰</span><div><p class="font-bold">${pend[0].nombre}</p><p class="text-sm">A las ${pend[0].proxima_toma}</p></div></div>` : ''}</div><div class="px-4 -mt-4"><div class="bg-white rounded-2xl shadow-lg p-4 flex gap-3"><button onclick="openModal('camera')" class="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">📷</span><span class="text-xs font-medium">Escanear</span></button><button onclick="openModal('add')" class="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">➕</span><span class="text-xs font-medium">Añadir</span></button></div></div>${pend.length > 0 ? `<div class="px-4 mt-6"><h2 class="text-lg font-bold text-gray-800 mb-3">⏰ Pendientes</h2><div class="space-y-3">${pend.map(m => `<div class="bg-white rounded-2xl shadow-md p-4 border-l-4 border-orange-400"><div class="flex items-center gap-4"><div class="w-14 h-14 ${m.color || 'bg-gray-500'} rounded-xl flex items-center justify-center text-2xl shadow-md">💊</div><div class="flex-1"><h3 class="font-bold text-gray-800">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis}</p>${m.notas ? `<p class="text-xs text-gray-400 mt-1">📝 ${m.notas}</p>` : ''}</div><div class="text-right"><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="flex gap-2 mt-3"><button onclick="takeMed('${m.id}')" class="flex-1 bg-green-500 text-white py-2 rounded-xl text-sm font-medium">✅ Ahora</button><button onclick="openModal('time','${m.id}')" class="flex-1 bg-blue-100 text-blue-700 py-2 rounded-xl text-sm font-medium">🕐 Otra hora</button></div></div>`).join('')}</div></div>` : ''}${state.meds.filter(m => m.activo).length === 0 ? '<div class="px-4 mt-12 text-center"><div class="text-6xl mb-4">💊</div><h3 class="text-xl font-bold text-gray-700 mb-2">Sin medicamentos</h3><p class="text-gray-500">Escanea una receta para empezar</p></div>' : ''}`
-}
-
-function renderMeds() {
-    const active = state.meds.filter(m => m.activo);
-    return `<div class="bg-white p-4 border-b sticky top-0 z-10 flex justify-between items-center"><div><h1 class="text-xl font-bold text-gray-800">💊 Medicamentos</h1></div><button onclick="openModal('add')" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">+ Añadir</button></div><div class="p-4 space-y-3">${active.length === 0 ? '<div class="text-center py-12"><div class="text-5xl mb-4">📋</div><p class="text-gray-500">Lista vacía</p></div>' : ''}${active.map(m => `<div class="bg-white rounded-2xl shadow-md overflow-hidden"><div class="${m.color || 'bg-gray-500'} p-4 flex items-center gap-3"><span class="text-3xl">💊</span><div class="text-white flex-1"><h3 class="font-bold text-lg">${m.nombre}</h3><p class="text-white/80 text-sm">${m.dosis}</p></div></div><div class="p-4"><div class="grid grid-cols-2 gap-4 text-sm"><div><p class="text-gray-400">Frecuencia</p><p class="font-bold text-gray-800">Cada ${m.frecuencia}h</p></div><div><p class="text-gray-400">Próxima</p><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="mt-3 pt-3 border-t flex gap-2"><button onclick="openModal('edit','${m.id}')" class="flex-1 text-indigo-500 py-2 text-sm font-medium">✏️ Editar</button><button onclick="delMed('${m.id}')" class="flex-1 text-red-500 py-2 text-sm font-medium">🗑️ Eliminar</button></div></div></div>`).join('')}</div>`
-}
-
-function renderHistory() {
-    const f = Act.filteredHist(), fl = state.histFilter;
-    return `<div class="bg-white p-4 border-b sticky top-0 z-10"><h1 class="text-xl font-bold text-gray-800">📊 Historial</h1><div class="flex gap-2 mt-3">${['day', 'week'].map(t => `<button onclick="setHistFilter('${t}')" class="flex-1 py-2 rounded-xl text-sm font-medium ${fl.type === t ? 'bg-indigo-500 text-white' : 'bg-gray-100 text-gray-600'}">${{ day: 'Día', week: 'Semana' }[t]}</button>`).join('')}</div></div><div class="p-4 space-y-3">${f.length === 0 ? '<div class="text-center py-12"><div class="text-5xl mb-4">📊</div><p class="text-gray-500">Sin registros</p></div>' : ''}${f.map(h => `<div class="bg-white rounded-xl p-4 shadow-sm border"><div class="flex items-start gap-3"><div class="w-10 h-10 rounded-full flex items-center justify-center text-lg ${h.estado === 'tomado' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${h.estado === 'tomado' ? '✓' : '✗'}</div><div class="flex-1"><h4 class="font-bold text-gray-800">${h.nombre}</h4><p class="text-xs text-gray-400">${new Date(h.fecha).toLocaleString('es-ES')}</p></div></div></div>`).join('')}</div>`
-}
-
-function renderProfile() {
-    return `<div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-6 rounded-b-3xl"><div class="flex items-center gap-4"><div class="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center text-3xl">👤</div><div><h2 class="text-xl font-bold">${currentUser?.email || 'Usuario'}</h2><p class="text-purple-200 text-sm">${currentUser?.id === 'local' ? 'Modo Local' : 'Sincronizado'}</p></div></div></div><div class="p-4 space-y-4"><div class="bg-white rounded-2xl shadow-md p-4"><h3 class="font-bold text-gray-800 mb-3">⚙️ Cuenta</h3><button onclick="logout()" class="w-full bg-red-50 text-red-600 py-3 rounded-xl font-medium">Cerrar sesión</button></div></div>`
-}
-
-function renderModal() {
-    const m = state.selMed;
-    if (state.modal === 'time' && m) return `<div class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-3xl w-full max-w-sm overflow-hidden animate-slideUp"><div class="${m.color || 'bg-indigo-500'} p-4 text-white"><h2 class="font-bold text-lg">🕐 ¿Hora de la toma?</h2><p class="text-white/80">${m.nombre}</p></div><div class="p-6"><input type="time" id="customTime" value="${U.time()}" class="w-full text-2xl font-bold border-2 border-gray-200 rounded-xl p-3 text-center mb-4"><div class="flex gap-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="takeMed('${m.id}',document.getElementById('customTime').value)" class="flex-1 bg-green-500 text-white py-3 rounded-xl font-bold">✅ Confirmar</button></div></div></div></div>`;
-    if (state.modal === 'edit' && m) return `<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="${m.color || 'bg-indigo-500'} p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">✏️ Editar</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="eNombre" value="${m.nombre}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eDosis" value="${m.dosis}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="eFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3">${[4, 6, 8, 12, 24].map(h => `<option value="${h}" ${m.frecuencia === h ? 'selected' : ''}>${h}h</option>`).join('')}</select><input type="time" id="eHora" value="${m.hora_inicio || '08:00'}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eNotas" value="${m.notas || ''}" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveEdit()" class="w-full bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Guardar</button></div></div></div>`;
-    if (state.modal === 'add') return `<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="bg-green-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Añadir</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="nNombre" placeholder="Nombre" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nDosis" placeholder="Dosis" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="nFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><option value="8">8h</option><option value="12">12h</option><option value="24">24h</option></select><input type="time" id="nHora" value="08:00" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nNotas" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveNew()" class="w-full bg-green-500 text-white py-3 rounded-xl font-bold">✅ Guardar</button></div></div></div>`;
-    if (state.modal === 'camera') return `<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">📷 Escanear receta</h2><div class="w-8"></div></div><div class="flex-1 flex flex-col items-center justify-center gap-6 p-8"><button onclick="captureRecipe()" class="w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">📷</span> Hacer foto</button><button onclick="scanRecipe()" class="w-full bg-white text-gray-800 px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">🖼️</span> Galería</button><p class="text-white/60 text-sm text-center mt-4">Analizaremos la foto con IA de forma segura</p></div></div>`;
-    if (state.modal === 'ocr-results') return `<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="bg-white flex-1 rounded-t-3xl mt-16 overflow-auto"><div class="p-4 border-b"><h3 class="font-bold text-lg">✅ Detectado</h3><p class="text-sm text-gray-500">Confirma los datos</p></div><div class="p-4 space-y-2">${state.pendingOCR.map(med => `<div onclick="toggleOCR(${med.id})" class="p-4 rounded-xl border-2 cursor-pointer ${med.checked ? 'border-green-500 bg-green-50' : 'border-gray-200'}"><div class="flex items-center gap-3"><div class="w-6 h-6 rounded-full border-2 flex items-center justify-center ${med.checked ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300'}">${med.checked ? '✓' : ''}</div><div class="flex-1"><h4 class="font-bold">${med.nombre}</h4><p class="text-sm text-gray-500">${med.dosis} - cada ${med.frecuencia}h</p></div></div></div>`).join('')}</div><div class="p-4 border-t"><button onclick="confirmOCR()" class="w-full bg-green-500 text-white py-4 rounded-xl font-bold">Añadir ${state.pendingOCR.filter(m => m.checked).length} medicinas</button><button onclick="closeModal()" class="w-full mt-2 text-gray-500 py-2">Cancelar</button></div></div></div>`;
-    return ''
-}
-
-// Inicialización de la App
-async function init() {
-    await Cloud.init();
-    DB.load();
+function renderLogin(){return`<div class="h-screen bg-indigo-600 flex flex-col justify-center p-8"><h1 class="text-white text-3xl font-bold mb-8 text-center">Mi Medicación</h1><input id="email" type="email" placeholder="Email" class="p-4 rounded-xl mb-4"><input id="pwd" type="password" placeholder="Pass" class="p-4 rounded-xl mb-4"><button onclick="doLogin()" class="bg-white text-indigo-600 p-4 rounded-xl font-bold">Entrar</button><button onclick="offlineMode()" class="mt-4 text-white">Modo Offline</button></div>`}
+function renderApp(){
+    const pend=state.meds.filter(m=>m.activo&&!U.takenToday(m.id)),comp=state.meds.filter(m=>m.activo&&U.takenToday(m.id));
+    let c='';
+    if(state.tab==='home')c=`<div class="bg-indigo-600 text-white p-6 rounded-b-3xl mb-4"><h1 class="text-2xl font-bold">Hoy</h1><p>${U.date()}</p></div><div class="px-4"><button onclick="openModal('camera')" class="w-full bg-indigo-100 text-indigo-600 p-4 rounded-xl font-bold mb-4 flex items-center justify-center gap-2">📷 Escanear Receta</button><button onclick="openModal('add')" class="w-full border-2 border-indigo-100 text-gray-600 p-4 rounded-xl font-bold mb-6">+ Añadir Manual</button><h2 class="font-bold mb-2">Pendientes (${pend.length})</h2>${pend.map(m=>`<div class="bg-white p-4 rounded-xl shadow mb-2 flex justify-between items-center border-l-4 border-orange-400"><div><h3 class="font-bold">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis} • ${m.proxima_toma}</p></div><button onclick="takeMed('${m.id}')" class="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-sm font-bold">Tomar</button></div>`).join('')}${pend.length===0?'<p class="text-gray-400 text-center">Todo listo por hoy 🎉</p>':''}</div>`;
+    else if(state.tab==='meds')c=`<div class="p-4"><h2 class="text-xl font-bold mb-4">Mis Medicamentos</h2>${state.meds.filter(m=>m.activo).map(m=>`<div class="bg-white p-4 rounded-xl shadow mb-3"><div class="flex justify-between"><div><h3 class="font-bold">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis} • Cada ${m.frecuencia}h</p></div><button onclick="openModal('edit','${m.id}')">✏️</button></div></div>`).join('')}</div>`;
+    else if(state.tab==='history')c=`<div class="p-4"><h2 class="text-xl font-bold mb-4">Historial</h2>${Act.filteredHist().map(h=>`<div class="bg-white p-3 rounded-xl shadow mb-2 flex items-center gap-3"><span class="${h.estado==='tomado'?'text-green-500':'text-red-500'} font-bold">${h.estado==='tomado'?'✓':'✗'}</span><div><p class="font-bold">${h.nombre}</p><p class="text-xs text-gray-400">${new Date(h.fecha).toLocaleString()}</p></div></div>`).join('')}</div>`;
+    else if(state.tab==='profile')c=`<div class="p-8"><h2 class="text-xl font-bold mb-4">Perfil</h2><p class="mb-4">${currentUser?.email}</p><button onclick="logout()" class="text-red-500">Cerrar Sesión</button></div>`;
     
-    // Comprobar si ya teníamos permisos
-    if ('Notification' in window && Notification.permission === 'granted') state.perms.notif = true;
-    
-    render();
-    
-    // Simular carga y navegar
-    setTimeout(() => {
-        if (currentUser) state.screen = 'app'; else state.screen = 'permissions';
-        render();
-        if (state.perms.notif) Notif.schedule();
-    }, 1500);
+    return`<div class="h-screen flex flex-col bg-gray-50"><div class="flex-1 overflow-auto pb-20">${c}</div><div class="fixed bottom-0 w-full bg-white border-t flex justify-around p-3">${['home','meds','history','profile'].map(t=>`<button onclick="setTab('${t}')" class="text-2xl ${state.tab===t?'opacity-100':'opacity-50'}">${{home:'🏠',meds:'💊',history:'📋',profile:'👤'}[t]}</button>`).join('')}</div>${state.modal?renderModal():''}</div>`
+}
+function renderModal(){
+    const m=state.selMed;
+    if(state.modal==='camera')return`<div class="fixed inset-0 bg-black z-50 flex flex-col justify-center p-8 gap-4"><button onclick="closeModal()" class="text-white absolute top-4 right-4 text-2xl">✕</button><button onclick="captureRecipe()" class="bg-indigo-600 text-white p-6 rounded-2xl font-bold text-xl">📸 Hacer Foto</button><button onclick="scanRecipe()" class="bg-white text-gray-900 p-6 rounded-2xl font-bold text-xl">🖼️ Galería</button></div>`;
+    if(state.modal==='ocr-results')return`<div class="fixed inset-0 bg-white z-50 overflow-auto"><div class="p-4 border-b flex justify-between items-center"><h2 class="font-bold">Resultados</h2><button onclick="closeModal()">✕</button></div><div class="p-4">${state.pendingOCR.map(m=>`<div onclick="toggleOCR(${m.id})" class="p-4 border-2 rounded-xl mb-2 ${m.checked?'border-green-500 bg-green-50':'border-gray-200'}"><h3 class="font-bold">${m.nombre}</h3><p>${m.dosis} • ${m.frecuencia}h</p></div>`).join('')}<button onclick="confirmOCR()" class="w-full bg-green-500 text-white p-4 rounded-xl font-bold mt-4">Guardar Seleccionados</button></div></div>`;
+    if(state.modal==='add')return`<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div class="bg-white w-full max-w-sm rounded-2xl p-6"><h2 class="font-bold mb-4">Añadir</h2><input id="nNombre" placeholder="Nombre" class="w-full p-2 border rounded mb-2"><input id="nDosis" placeholder="Dosis" class="w-full p-2 border rounded mb-2"><input id="nFrec" type="number" placeholder="Horas (8)" class="w-full p-2 border rounded mb-2"><input id="nHora" type="time" value="08:00" class="w-full p-2 border rounded mb-2"><input id="nNotas" placeholder="Notas" class="w-full p-2 border rounded mb-4"><div class="flex gap-2"><button onclick="closeModal()" class="flex-1 p-2 bg-gray-100 rounded">Cancelar</button><button onclick="saveNew()" class="flex-1 p-2 bg-green-500 text-white rounded">Guardar</button></div></div></div>`;
+    return'';
 }
 
-// Arrancar
 init();
+async function init(){await Cloud.init();DB.load();setTimeout(()=>{state.screen=currentUser?'app':'login';render()},1000)}
 
 })();
 </script>
