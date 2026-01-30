@@ -175,7 +175,79 @@ const Cloud = {
 
 // Lógica IA (Segura con Edge Function)
 const Gemini = {
-    async analyze(b64) {
+    async analyze(b64){
+        if(!sbClient){
+            U.toast('Necesitas conexión para analizar recetas','error');
+            return [];
+        }
+
+        console.log('📡 Contactando con Supabase Edge Function...');
+        
+        try{
+            // Llamada a la función
+            const { data, error } = await sbClient.functions.invoke('analizar-receta', {
+                body: { image: b64 }
+            });
+
+            if(error){
+                console.error('Error Edge Function:', error);
+                throw new Error('Error en la nube: ' + error.message);
+            }
+
+            console.log('📥 Respuesta cruda:', data);
+
+            // 1. Extraer el texto de la respuesta de Google
+            let txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            if (!txt) {
+                console.error('Estructura inesperada:', data);
+                throw new Error('La IA no devolvió texto legible');
+            }
+
+            console.log('📝 Texto de la IA:', txt);
+            
+            // 2. LIMPIEZA AGRESIVA (La parte nueva)
+            // Buscamos dónde empieza el primer corchete '[' y dónde acaba el último ']'
+            const firstBracket = txt.indexOf('[');
+            const lastBracket = txt.lastIndexOf(']');
+            
+            if (firstBracket !== -1 && lastBracket !== -1) {
+                // Nos quedamos solo con lo que hay entre corchetes
+                txt = txt.substring(firstBracket, lastBracket + 1);
+            } else {
+                throw new Error('No se encontró una lista JSON en la respuesta');
+            }
+
+            // 3. Parsear
+            let medicamentos = [];
+            try {
+                medicamentos = JSON.parse(txt);
+            } catch(parseError) {
+                console.error('Falló el JSON.parse con este texto:', txt);
+                throw new Error('El formato de la IA no es válido');
+            }
+            
+            // 4. Validar datos
+            const medsValidos = (Array.isArray(medicamentos) ? medicamentos : [])
+                .filter(m => m && m.nombre)
+                .map(m => ({
+                    nombre: String(m.nombre || '').trim(),
+                    dosis: String(m.dosis || 'Según pauta').trim(),
+                    frecuencia: parseInt(m.frecuencia) || 8,
+                    dias: parseInt(m.dias) || 0,
+                    notas: String(m.notas || '').trim()
+                }));
+            
+            if(medsValidos.length === 0) U.toast('No se detectaron medicamentos claros','warning');
+            return medsValidos;
+            
+        }catch(e){
+            console.error('Error total:', e);
+            // Mostramos el error en pantalla para que sepas qué pasa
+            U.toast(e.message, 'error');
+            return [];
+        }
+    },
         if (!sbClient) {
             U.toast('Necesitas conexión para analizar recetas', 'error');
             return [];
