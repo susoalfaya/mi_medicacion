@@ -217,10 +217,37 @@ const Notif={
 
 // Cámara
 const Cam={
+    // Cámara directa (móvil)
+    async capture(){
+        return new Promise(res=>{
+            const inp=document.createElement('input');
+            inp.type='file';
+            inp.accept='image/*';
+            inp.capture='environment'; // Cámara trasera
+            inp.onchange=e=>{
+                const f=e.target.files[0];
+                if(!f)return res(null);
+                const r=new FileReader();
+                r.onload=()=>res(r.result.split(',')[1]);
+                r.readAsDataURL(f)
+            };
+            inp.click()
+        })
+    },
+    // Seleccionar de galería
     async select(){
         return new Promise(res=>{
-            const inp=document.createElement('input');inp.type='file';inp.accept='image/*';
-            inp.onchange=e=>{const f=e.target.files[0];if(!f)return res(null);const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.readAsDataURL(f)};
+            const inp=document.createElement('input');
+            inp.type='file';
+            inp.accept='image/*';
+            // Sin capture = abre galería
+            inp.onchange=e=>{
+                const f=e.target.files[0];
+                if(!f)return res(null);
+                const r=new FileReader();
+                r.onload=()=>res(r.result.split(',')[1]);
+                r.readAsDataURL(f)
+            };
             inp.click()
         })
     }
@@ -305,6 +332,7 @@ window.delMed=id=>Act.del(id);
 window.toggleOCR=id=>{const i=state.pendingOCR.findIndex(m=>m.id===id);if(i!==-1){state.pendingOCR[i].checked=!state.pendingOCR[i].checked;render()}};
 window.confirmOCR=()=>Act.confirmOCR();
 window.scanRecipe=async()=>{const b=await Cam.select();if(b)await Act.ocr(b)};
+window.captureRecipe=async()=>{const b=await Cam.capture();if(b)await Act.ocr(b)};
 window.setHistFilter=t=>{state.histFilter.type=t;render()};
 window.setHistMed=id=>{state.histFilter.medId=id||null;render()};
 window.setHistDate=o=>{const d=new Date(state.histFilter.date);d.setDate(d.getDate()+o);state.histFilter.date=d;render()};
@@ -372,7 +400,7 @@ function renderModal(){
     if(state.modal==='time'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-3xl w-full max-w-sm overflow-hidden animate-slideUp"><div class="${m.color||'bg-indigo-500'} p-4 text-white"><h2 class="font-bold text-lg">🕐 ¿A qué hora lo tomaste?</h2><p class="text-white/80">${m.nombre}</p></div><div class="p-6"><input type="time" id="customTime" value="${U.time()}" class="w-full text-2xl font-bold border-2 border-gray-200 rounded-xl p-3 text-center mb-4"><div class="flex gap-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="takeMed('${m.id}',document.getElementById('customTime').value)" class="flex-1 bg-green-500 text-white py-3 rounded-xl font-bold">✅ Confirmar</button></div></div></div></div>`;
     if(state.modal==='edit'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="${m.color||'bg-indigo-500'} p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">✏️ Editar</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="eNombre" value="${m.nombre}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eDosis" value="${m.dosis}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="eFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3">${[4,6,8,12,24].map(h=>`<option value="${h}" ${m.frecuencia===h?'selected':''}>${h}h</option>`).join('')}</select><input type="time" id="eHora" value="${m.hora_inicio||'08:00'}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="number" id="eDias" value="${m.dias||0}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eNotas" value="${m.notas||''}" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveEdit()" class="w-full bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Guardar</button></div></div></div>`;
     if(state.modal==='add')return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="bg-green-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Añadir</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="nNombre" placeholder="Nombre" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nDosis" placeholder="Dosis" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="nFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><option value="8">8h</option><option value="12">12h</option><option value="24">24h</option></select><input type="time" id="nHora" value="08:00" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nNotas" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveNew()" class="w-full bg-green-500 text-white py-3 rounded-xl font-bold">✅ Guardar</button></div></div></div>`;
-    if(state.modal==='camera')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">📷 Escanear</h2><div></div></div><div class="flex-1 flex items-center justify-center"><button onclick="scanRecipe()" class="bg-white text-gray-800 px-10 py-4 rounded-full font-bold">📁 Seleccionar imagen</button></div></div>`;
+    if(state.modal==='camera')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">📷 Escanear receta</h2><div class="w-8"></div></div><div class="flex-1 flex flex-col items-center justify-center gap-6 p-8"><button onclick="captureRecipe()" class="w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">📷</span> Hacer foto</button><button onclick="scanRecipe()" class="w-full bg-white text-gray-800 px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">🖼️</span> Elegir de galería</button><p class="text-white/60 text-sm text-center mt-4">Fotografía tu receta médica y la analizaremos automáticamente con IA</p></div></div>`;
     if(state.modal==='ocr-results')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="bg-white flex-1 rounded-t-3xl mt-16 overflow-auto"><div class="p-4 border-b"><h3 class="font-bold text-lg">Medicamentos detectados</h3></div><div class="p-4 space-y-2">${state.pendingOCR.map(med=>`<div onclick="toggleOCR(${med.id})" class="p-4 rounded-xl border-2 ${med.checked?'border-green-500 bg-green-50':'border-gray-200'}"><h4 class="font-bold">${med.nombre}</h4><p class="text-sm text-gray-500">${med.dosis}</p></div>`).join('')}</div><div class="p-4 border-t"><button onclick="confirmOCR()" class="w-full bg-green-500 text-white py-4 rounded-xl font-bold">Añadir seleccionados</button></div></div></div>`;
     return''
 }
