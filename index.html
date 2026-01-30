@@ -37,9 +37,9 @@
 //                    CONFIGURACIÓN - EDITAR ESTOS VALORES
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-    SUPABASE_URL: '{{SUPABASE_URL}}',
-    SUPABASE_KEY: '{{SUPABASE_KEY}}',
-    GEMINI_API_KEY: '{{GEMINI_API_KEY}}',
+    SUPABASE_URL: 'TU_SUPABASE_URL_AQUI',
+    SUPABASE_KEY: 'TU_SUPABASE_KEY_AQUI',
+    GEMINI_API_KEY: localStorage.getItem('gemini_api_key') || 'NO_CONFIGURADA',
     AVISO_MINUTOS: 5
 };
 
@@ -47,7 +47,7 @@ const CONFIG = {
 let sbClient = null;
 let currentUser = null;
 
-const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false,loadingMsg:'Procesando...'};
+const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false,loadingMsg:'Procesando...',showApiKeySetup:false};
 
 // Utilidades
 const U={
@@ -553,9 +553,12 @@ window.reqNotif=()=>Notif.request();
 window.reqCam=async()=>{try{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(t=>t.stop());state.perms.camera=true;render()}catch(e){console.error('Error solicitando cámara:',e)}};
 window.goLogin=()=>{state.screen='login';render()};
 window.skipPerms=()=>{state.screen='login';render()};
+window.saveApiKey=()=>{const key=document.getElementById('apiKeyInput')?.value?.trim();if(!key||key.length<30){U.toast('API key inválida','error');return}localStorage.setItem('gemini_api_key',key);CONFIG.GEMINI_API_KEY=key;state.showApiKeySetup=false;state.screen='app';U.toast('✅ API key guardada');render()};
+window.skipApiKey=()=>{state.showApiKeySetup=false;state.screen='app';render()};
 window.doLogin=async()=>{const e=document.getElementById('email')?.value,p=document.getElementById('pwd')?.value;if(!e||!p){U.toast('Introduce email y contraseña','error');return}state.loading=true;render();const{error}=await Cloud.login(e,p);state.loading=false;if(error)U.toast('Error: '+error.message,'error');else{state.screen='app';render()}};
 window.offlineMode=()=>{currentUser={id:'local',email:'Usuario local'};DB.set('user',currentUser);state.screen='app';render()};
 window.logout=()=>Cloud.logout();
+window.updateApiKey=()=>{const key=document.getElementById('newApiKey')?.value?.trim();if(!key||key.length<30){U.toast('API key inválida','error');return}localStorage.setItem('gemini_api_key',key);CONFIG.GEMINI_API_KEY=key;state.modal=null;U.toast('✅ API key actualizada');render()};
 window.saveEdit=()=>{const f={nombre:document.getElementById('eNombre')?.value,dosis:document.getElementById('eDosis')?.value,frecuencia:parseInt(document.getElementById('eFrec')?.value)||8,hora_inicio:document.getElementById('eHora')?.value,dias:parseInt(document.getElementById('eDias')?.value)||0,notas:document.getElementById('eNotas')?.value||''};if(!f.nombre||!f.dosis){U.toast('Nombre y dosis obligatorios','error');return}Act.update(state.selMed.id,f)};
 window.saveNew=()=>{const f={nombre:document.getElementById('nNombre')?.value,dosis:document.getElementById('nDosis')?.value,frecuencia:parseInt(document.getElementById('nFrec')?.value)||8,horaInicio:document.getElementById('nHora')?.value||'08:00',dias:parseInt(document.getElementById('nDias')?.value)||0,notas:document.getElementById('nNotas')?.value||''};if(!f.nombre||!f.dosis){U.toast('Nombre y dosis obligatorios','error');return}Act.add(f);state.modal=null;U.toast('✅ Medicamento añadido');render()};
 
@@ -563,6 +566,7 @@ window.saveNew=()=>{const f={nombre:document.getElementById('nNombre')?.value,do
 function render(){
     const $=document.getElementById('app');
     if(state.screen==='splash'){$.innerHTML=renderSplash();return}
+    if(state.showApiKeySetup){$.innerHTML=renderApiKeySetup();return}
     if(state.screen==='permissions'){$.innerHTML=renderPerms();return}
     if(state.screen==='login'){$.innerHTML=renderLogin();return}
     $.innerHTML=renderApp()
@@ -570,6 +574,10 @@ function render(){
 
 function renderSplash(){
     return`<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col items-center justify-center"><div class="text-8xl mb-6">💊</div><h1 class="text-white text-3xl font-bold mb-2">Mi Medicación</h1><p class="text-white/70">Cargando...</p></div>`
+}
+
+function renderApiKeySetup(){
+    return`<div class="h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex flex-col"><div class="flex-1 flex flex-col items-center justify-center p-8"><div class="text-7xl mb-6">🔑</div><h1 class="text-white text-2xl font-bold mb-2 text-center">API Key de Gemini</h1><p class="text-white/70 text-center mb-8">Necesitamos tu clave API de Google para analizar recetas</p><div class="w-full max-w-sm space-y-4"><div class="bg-blue-500 text-white rounded-xl p-4 text-sm"><p class="font-bold mb-2">📍 ¿Cómo obtener tu clave?</p><ol class="list-decimal list-inside space-y-1"><li>Ve a <strong>aistudio.google.com/apikey</strong></li><li>Inicia sesión con tu Google</li><li>Click en <strong>Create API Key</strong></li><li>Copia la clave (empieza por <strong>AIza...</strong>)</li></ol></div><input id="apiKeyInput" type="password" placeholder="AIzaSy..." class="w-full bg-white/20 backdrop-blur text-white placeholder-white/50 rounded-2xl px-4 py-4 outline-none text-center font-mono"><button onclick="saveApiKey()" class="w-full bg-white text-indigo-600 py-4 rounded-2xl font-bold text-lg shadow-lg">✅ Guardar clave</button><button onclick="skipApiKey()" class="w-full text-white/70 py-3 text-sm">Configurar después</button></div></div></div>`
 }
 
 function renderPerms(){
@@ -605,11 +613,12 @@ function renderHistory(){
 }
 
 function renderProfile(){
-    return`<div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-6 rounded-b-3xl"><div class="flex items-center gap-4"><div class="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center text-3xl">👤</div><div><h2 class="text-xl font-bold">${currentUser?.email||'Usuario'}</h2><p class="text-purple-200 text-sm">${currentUser?.id==='local'?'Modo sin conexión':'Sincronizado'}</p></div></div></div><div class="p-4 space-y-4"><div class="bg-white rounded-2xl shadow-md p-4"><button onclick="logout()" class="w-full bg-red-50 text-red-600 py-3 rounded-xl font-medium">Cerrar sesión</button></div></div>`
+    return`<div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-6 rounded-b-3xl"><div class="flex items-center gap-4"><div class="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center text-3xl">👤</div><div><h2 class="text-xl font-bold">${currentUser?.email||'Usuario'}</h2><p class="text-purple-200 text-sm">${currentUser?.id==='local'?'Modo sin conexión':'Sincronizado'}</p></div></div></div><div class="p-4 space-y-4"><div class="bg-white rounded-2xl shadow-md p-4"><h3 class="font-bold text-gray-800 mb-3">⚙️ Configuración</h3><button onclick="openModal('api-key')" class="w-full bg-indigo-50 text-indigo-600 py-3 rounded-xl font-medium mb-2">🔑 Cambiar API Key</button><button onclick="logout()" class="w-full bg-red-50 text-red-600 py-3 rounded-xl font-medium">Cerrar sesión</button></div></div>`
 }
 
 function renderModal(){
     const m=state.selMed;
+    if(state.modal==='api-key')return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp"><div class="bg-indigo-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">🔑 API Key de Gemini</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><div class="bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm"><p class="text-blue-900">La clave se guarda solo en tu dispositivo y se usa para analizar recetas.</p></div><input type="password" id="newApiKey" placeholder="AIzaSy..." class="w-full border-2 border-gray-200 rounded-xl px-4 py-3 text-center font-mono"><button onclick="updateApiKey()" class="w-full bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Actualizar</button></div></div></div>`;
     if(state.modal==='time'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-3xl w-full max-w-sm overflow-hidden animate-slideUp"><div class="${m.color||'bg-indigo-500'} p-4 text-white"><h2 class="font-bold text-lg">🕐 ¿A qué hora lo tomaste?</h2><p class="text-white/80">${m.nombre}</p></div><div class="p-6"><input type="time" id="customTime" value="${U.time()}" class="w-full text-2xl font-bold border-2 border-gray-200 rounded-xl p-3 text-center mb-4"><div class="flex gap-2"><button onclick="closeModal()" class="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl font-medium">Cancelar</button><button onclick="takeMed('${m.id}',document.getElementById('customTime').value)" class="flex-1 bg-green-500 text-white py-3 rounded-xl font-bold">✅ Confirmar</button></div></div></div></div>`;
     if(state.modal==='edit'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="${m.color||'bg-indigo-500'} p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">✏️ Editar</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="eNombre" value="${m.nombre}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eDosis" value="${m.dosis}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="eFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3">${[4,6,8,12,24].map(h=>`<option value="${h}" ${m.frecuencia===h?'selected':''}>${h}h</option>`).join('')}</select><input type="time" id="eHora" value="${m.hora_inicio||'08:00'}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="number" id="eDias" value="${m.dias||0}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eNotas" value="${m.notas||''}" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveEdit()" class="w-full bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Guardar</button></div></div></div>`;
     if(state.modal==='add')return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="bg-green-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Añadir</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="nNombre" placeholder="Nombre" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nDosis" placeholder="Dosis" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="nFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><option value="8">8h</option><option value="12">12h</option><option value="24">24h</option></select><input type="time" id="nHora" value="08:00" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nNotas" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveNew()" class="w-full bg-green-500 text-white py-3 rounded-xl font-bold">✅ Guardar</button></div></div></div>`;
@@ -634,6 +643,16 @@ async function init(){
     render();
     
     setTimeout(()=>{
+        // ✅ Verificar si API key está configurada
+        const hasApiKey=localStorage.getItem('gemini_api_key');
+        
+        if(!hasApiKey){
+            state.showApiKeySetup=true;
+            state.screen='app';
+            render();
+            return;
+        }
+        
         if(currentUser){
             state.screen='app';
             if(state.perms.notif)Notif.schedule()
