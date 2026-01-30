@@ -29,7 +29,7 @@ serve(async (req) => {
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: "Extrae medicamentos en JSON: [{nombre, dosis, frecuencia(num), dias(num), notas}]" },
+              { text: "Extrae medicamentos en JSON: [{Eres un asistente JSON. Extrae los medicamentos de la imagen. Responde ÚNICAMENTE con un Array JSON puro, sin markdown (```json), sin explicaciones y sin texto adicional. Formato: [{nombre, dosis, frecuencia(num), dias(num), notas}], dosis, frecuencia(num), dias(num), notas}]" },
               { inline_data: { mime_type: 'image/jpeg', data: image } }
             ]
           }]
