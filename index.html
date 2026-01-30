@@ -43,7 +43,7 @@ const CONFIG={
     AVISO_MINUTOS:5
 };
 
-// Variables globales - SOLO SE DECLARAN UNA VEZ
+// Variables globales
 let sbClient = null;
 let currentUser = null;
 
@@ -70,7 +70,7 @@ const DB={
     save:()=>{DB.set('meds',state.meds);DB.set('history',state.history);if(currentUser)DB.set('user',currentUser)}
 };
 
-// Supabase
+// Supabase - CORREGIDO
 const Cloud={
     async init(){
         if(!window.supabase || !window.supabase.createClient){
@@ -81,6 +81,14 @@ const Cloud={
         try{
             sbClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
             console.log('✅ Supabase inicializado');
+            
+            // ✅ NUEVO: Verificar sesión existente
+            const {data:{session}} = await sbClient.auth.getSession();
+            if(session?.user){
+                currentUser = {id: session.user.id, email: session.user.email};
+                DB.set('user', currentUser);
+                console.log('✅ Sesión recuperada:', currentUser.email);
+            }
         }catch(e){
             console.error('Error inicializando Supabase:',e);
         }
@@ -98,11 +106,17 @@ const Cloud={
                 const result = await sbClient.auth.signUp({email,password:pwd});
                 data = result.data;
                 error = result.error;
+                
+                // ✅ NUEVO: Si es signup, esperar confirmación
+                if(!error && data.user){
+                    console.log('✅ Usuario registrado. Verifica tu email si es necesario.');
+                }
             }
             
             if(!error && data.user){
                 currentUser={id:data.user.id,email:data.user.email};
                 DB.set('user',currentUser);
+                console.log('✅ Login exitoso:', currentUser.email);
                 await Cloud.loadData();
             }
             return{data,error}
@@ -113,31 +127,94 @@ const Cloud={
     },
     
     async loadData(){
-        if(!sbClient||!currentUser)return;
+        if(!sbClient||!currentUser){
+            console.warn('⚠️ No hay sesión activa, usando datos locales');
+            return;
+        }
+        
         try{
-            const{data:m}=await sbClient.from('medicamentos').select('*').eq('user_id',currentUser.id).eq('activo',true);
-            const{data:h}=await sbClient.from('historial').select('*').eq('user_id',currentUser.id).order('created_at',{ascending:false}).limit(100);
-            if(m)state.meds=m;if(h)state.history=h;DB.save()
+            console.log('📥 Cargando datos del usuario:', currentUser.id);
+            
+            // ✅ CORREGIDO: Manejo de errores mejorado
+            const{data:m, error:mError}=await sbClient
+                .from('medicamentos')
+                .select('*')
+                .eq('user_id',currentUser.id)
+                .eq('activo',true);
+            
+            const{data:h, error:hError}=await sbClient
+                .from('historial')
+                .select('*')
+                .eq('user_id',currentUser.id)
+                .order('created_at',{ascending:false})
+                .limit(100);
+            
+            if(mError) console.error('Error cargando medicamentos:', mError);
+            if(hError) console.error('Error cargando historial:', hError);
+            
+            if(m){
+                state.meds=m;
+                console.log(`✅ ${m.length} medicamentos cargados`);
+            }
+            if(h){
+                state.history=h;
+                console.log(`✅ ${h.length} registros de historial cargados`);
+            }
+            
+            DB.save();
         }catch(e){
             console.error('Error cargando datos:',e);
+            U.toast('Error cargando datos de la nube','error');
         }
     },
     
     async saveMed(med){
-        DB.save();
-        if(!sbClient||!currentUser)return;
+        DB.save(); // Siempre guardar localmente primero
+        
+        if(!sbClient||!currentUser){
+            console.warn('⚠️ Guardado solo local (sin sesión)');
+            return;
+        }
+        
         try{
-            await sbClient.from('medicamentos').upsert({...med,user_id:currentUser.id})
+            console.log('💾 Guardando medicamento:', med.nombre);
+            
+            const {data, error} = await sbClient
+                .from('medicamentos')
+                .upsert({...med, user_id:currentUser.id});
+            
+            if(error){
+                console.error('❌ Error guardando medicamento:', error);
+                U.toast('Error sincronizando con la nube','error');
+            }else{
+                console.log('✅ Medicamento sincronizado');
+            }
         }catch(e){
             console.error('Error guardando medicamento:',e);
         }
     },
     
     async saveHist(e){
-        DB.save();
-        if(!sbClient||!currentUser)return;
+        DB.save(); // Siempre guardar localmente primero
+        
+        if(!sbClient||!currentUser){
+            console.warn('⚠️ Historial guardado solo local (sin sesión)');
+            return;
+        }
+        
         try{
-            await sbClient.from('historial').insert({...e,user_id:currentUser.id})
+            console.log('💾 Guardando historial:', e.nombre, e.estado);
+            
+            const {data, error} = await sbClient
+                .from('historial')
+                .insert({...e, user_id:currentUser.id});
+            
+            if(error){
+                console.error('❌ Error guardando historial:', error);
+                U.toast('Error sincronizando historial','error');
+            }else{
+                console.log('✅ Historial sincronizado');
+            }
         }catch(e){
             console.error('Error guardando historial:',e);
         }
@@ -158,19 +235,17 @@ const Cloud={
     }
 };
 
-// Gemini OCR - ACTUALIZADO A GEMINI 2.5 FLASH
+// Gemini OCR
 const Gemini={
     async analyze(b64){
         console.log('📷 Iniciando análisis de imagen con Gemini...');
         
-        // Verificar que tenemos API key
         if(!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY==='TU_GEMINI_API_KEY'){
             console.error('❌ No hay API key de Gemini configurada');
             U.toast('Error: Configura la API key de Gemini','error');
             return [];
         }
         
-        // ✅ CAMBIADO: Usar gemini-2.5-flash en lugar de gemini-2.0-flash
         const url=`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${CONFIG.GEMINI_API_KEY}`;
         
         try{
@@ -216,7 +291,6 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
                 const errorText = await response.text();
                 console.error('❌ Error de API:', response.status, errorText);
                 
-                // Mensaje más claro para el usuario
                 if(response.status === 429){
                     U.toast('Límite de API alcanzado. Espera un momento e inténtalo de nuevo.','error');
                 }else{
@@ -228,7 +302,6 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
             const res = await response.json();
             console.log('📋 Respuesta completa:', JSON.stringify(res, null, 2));
             
-            // Extraer el texto de la respuesta
             let txt = res.candidates?.[0]?.content?.parts?.[0]?.text || '';
             console.log('📝 Texto extraído:', txt);
             
@@ -238,7 +311,6 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
                 return [];
             }
             
-            // Limpiar el texto de posibles formatos markdown
             txt = txt
                 .replace(/```json\s*/gi, '')
                 .replace(/```\s*/gi, '')
@@ -247,14 +319,12 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
             
             console.log('🧹 Texto limpio:', txt);
             
-            // Intentar encontrar el array JSON en el texto
             let jsonMatch = txt.match(/\[[\s\S]*\]/);
             if(jsonMatch){
                 txt = jsonMatch[0];
                 console.log('🎯 JSON encontrado:', txt);
             }
             
-            // Parsear el JSON
             let medicamentos;
             try {
                 medicamentos = JSON.parse(txt);
@@ -266,14 +336,12 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
                 return [];
             }
             
-            // Validar que es un array
             if(!Array.isArray(medicamentos)){
                 console.error('❌ La respuesta no es un array:', medicamentos);
                 U.toast('Formato de respuesta inválido','error');
                 return [];
             }
             
-            // Validar y limpiar cada medicamento
             const medsValidos = medicamentos
                 .filter(m => m && m.nombre && m.nombre.trim() !== '')
                 .map(m => ({
@@ -346,13 +414,12 @@ const Notif={
 
 // Cámara
 const Cam={
-    // Cámara directa (móvil)
     async capture(){
         return new Promise(res=>{
             const inp=document.createElement('input');
             inp.type='file';
             inp.accept='image/*';
-            inp.capture='environment'; // Cámara trasera
+            inp.capture='environment';
             inp.onchange=e=>{
                 const f=e.target.files[0];
                 if(!f)return res(null);
@@ -363,13 +430,11 @@ const Cam={
             inp.click()
         })
     },
-    // Seleccionar de galería
     async select(){
         return new Promise(res=>{
             const inp=document.createElement('input');
             inp.type='file';
             inp.accept='image/*';
-            // Sin capture = abre galería
             inp.onchange=e=>{
                 const f=e.target.files[0];
                 if(!f)return res(null);
@@ -463,9 +528,14 @@ const Act={
     }
 };
 
-// Handlers globales
+// ✅ CORREGIDO: Handlers globales con función auxiliar para "Otra hora"
 window.setTab=t=>{state.tab=t;render()};
-window.openModal=(m,med=null)=>{state.modal=m;state.selMed=med;render()};
+window.openModal=(m,medId=null)=>{
+    state.modal=m;
+    // ✅ Buscar el medicamento por ID
+    state.selMed = medId ? state.meds.find(x=>x.id===medId) : null;
+    render()
+};
 window.closeModal=()=>{state.modal=null;state.selMed=null;state.pendingOCR=[];render()};
 window.closeAI=()=>{state.aiAdvice=null;render()};
 window.takeMed=(id,t=null)=>{const m=state.meds.find(x=>x.id===id);if(m)Act.take(m,t)};
@@ -521,12 +591,12 @@ function renderApp(){
 }
 
 function renderHome(pend,comp,prog,now,date){
-    return`<div class="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white p-5 rounded-b-3xl"><div class="flex justify-between items-start mb-3"><div><p class="text-purple-200 text-sm">Buenos días 👋</p><h1 class="text-2xl font-bold">Mi Medicación</h1></div><div class="text-right"><p class="text-3xl font-bold">${now}</p><p class="text-purple-200 text-xs capitalize">${date}</p></div></div><div class="bg-white/20 backdrop-blur rounded-2xl p-4 mt-2"><div class="flex justify-between items-center mb-2"><span class="text-sm">Progreso de hoy</span><span class="font-bold">${comp.length}/${state.meds.filter(m=>m.activo).length}</span></div><div class="h-3 bg-white/30 rounded-full overflow-hidden"><div class="h-full bg-white rounded-full transition-all" style="width:${prog}%"></div></div></div>${pend.length>0&&pend[0].proxima_toma?`<div class="mt-3 bg-yellow-400 text-yellow-900 rounded-xl p-3 flex items-center gap-3"><span class="text-2xl">⏰</span><div><p class="font-bold">${pend[0].nombre}</p><p class="text-sm">A las ${pend[0].proxima_toma}</p></div></div>`:''}</div><div class="px-4 -mt-4"><div class="bg-white rounded-2xl shadow-lg p-4 flex gap-3"><button onclick="openModal('camera')" class="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">📷</span><span class="text-xs font-medium">Escanear</span></button><button onclick="openModal('add')" class="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">➕</span><span class="text-xs font-medium">Añadir</span></button></div></div>${pend.length>0?`<div class="px-4 mt-6"><h2 class="text-lg font-bold text-gray-800 mb-3">⏰ Pendientes</h2><div class="space-y-3">${pend.map(m=>`<div class="bg-white rounded-2xl shadow-md p-4 border-l-4 border-orange-400"><div class="flex items-center gap-4"><div class="w-14 h-14 ${m.color||'bg-gray-500'} rounded-xl flex items-center justify-center text-2xl shadow-md">💊</div><div class="flex-1"><h3 class="font-bold text-gray-800">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis}</p>${m.notas?`<p class="text-xs text-gray-400 mt-1">📝 ${m.notas}</p>`:''}</div><div class="text-right"><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="flex gap-2 mt-3"><button onclick="takeMed('${m.id}')" class="flex-1 bg-green-500 text-white py-2 rounded-xl text-sm font-medium">✅ Ahora</button><button onclick="openModal('time',state.meds.find(x=>x.id==='${m.id}'))" class="flex-1 bg-blue-100 text-blue-700 py-2 rounded-xl text-sm font-medium">🕐 Otra hora</button></div></div>`).join('')}</div></div>`:''}${state.meds.filter(m=>m.activo).length===0?'<div class="px-4 mt-12 text-center"><div class="text-6xl mb-4">💊</div><h3 class="text-xl font-bold text-gray-700 mb-2">Sin medicamentos</h3><p class="text-gray-500">Escanea una receta o añade uno manualmente</p></div>':''}`
+    return`<div class="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white p-5 rounded-b-3xl"><div class="flex justify-between items-start mb-3"><div><p class="text-purple-200 text-sm">Buenos días 👋</p><h1 class="text-2xl font-bold">Mi Medicación</h1></div><div class="text-right"><p class="text-3xl font-bold">${now}</p><p class="text-purple-200 text-xs capitalize">${date}</p></div></div><div class="bg-white/20 backdrop-blur rounded-2xl p-4 mt-2"><div class="flex justify-between items-center mb-2"><span class="text-sm">Progreso de hoy</span><span class="font-bold">${comp.length}/${state.meds.filter(m=>m.activo).length}</span></div><div class="h-3 bg-white/30 rounded-full overflow-hidden"><div class="h-full bg-white rounded-full transition-all" style="width:${prog}%"></div></div></div>${pend.length>0&&pend[0].proxima_toma?`<div class="mt-3 bg-yellow-400 text-yellow-900 rounded-xl p-3 flex items-center gap-3"><span class="text-2xl">⏰</span><div><p class="font-bold">${pend[0].nombre}</p><p class="text-sm">A las ${pend[0].proxima_toma}</p></div></div>`:''}</div><div class="px-4 -mt-4"><div class="bg-white rounded-2xl shadow-lg p-4 flex gap-3"><button onclick="openModal('camera')" class="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">📷</span><span class="text-xs font-medium">Escanear</span></button><button onclick="openModal('add')" class="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl p-3 flex flex-col items-center gap-1 shadow-md"><span class="text-2xl">➕</span><span class="text-xs font-medium">Añadir</span></button></div></div>${pend.length>0?`<div class="px-4 mt-6"><h2 class="text-lg font-bold text-gray-800 mb-3">⏰ Pendientes</h2><div class="space-y-3">${pend.map(m=>`<div class="bg-white rounded-2xl shadow-md p-4 border-l-4 border-orange-400"><div class="flex items-center gap-4"><div class="w-14 h-14 ${m.color||'bg-gray-500'} rounded-xl flex items-center justify-center text-2xl shadow-md">💊</div><div class="flex-1"><h3 class="font-bold text-gray-800">${m.nombre}</h3><p class="text-sm text-gray-500">${m.dosis}</p>${m.notas?`<p class="text-xs text-gray-400 mt-1">📝 ${m.notas}</p>`:''}</div><div class="text-right"><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="flex gap-2 mt-3"><button onclick="takeMed('${m.id}')" class="flex-1 bg-green-500 text-white py-2 rounded-xl text-sm font-medium">✅ Ahora</button><button onclick="openModal('time','${m.id}')" class="flex-1 bg-blue-100 text-blue-700 py-2 rounded-xl text-sm font-medium">🕐 Otra hora</button></div></div>`).join('')}</div></div>`:''}${state.meds.filter(m=>m.activo).length===0?'<div class="px-4 mt-12 text-center"><div class="text-6xl mb-4">💊</div><h3 class="text-xl font-bold text-gray-700 mb-2">Sin medicamentos</h3><p class="text-gray-500">Escanea una receta o añade uno manualmente</p></div>':''}`
 }
 
 function renderMeds(){
     const active=state.meds.filter(m=>m.activo);
-    return`<div class="bg-white p-4 border-b sticky top-0 z-10 flex justify-between items-center"><div><h1 class="text-xl font-bold text-gray-800">💊 Medicamentos</h1><p class="text-sm text-gray-500">${active.length} activos</p></div><button onclick="openModal('add')" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">+ Añadir</button></div><div class="p-4 space-y-3">${active.length===0?'<div class="text-center py-12"><div class="text-5xl mb-4">📋</div><p class="text-gray-500">No hay medicamentos</p></div>':''}${active.map(m=>`<div class="bg-white rounded-2xl shadow-md overflow-hidden"><div class="${m.color||'bg-gray-500'} p-4 flex items-center gap-3"><span class="text-3xl">💊</span><div class="text-white flex-1"><h3 class="font-bold text-lg">${m.nombre}</h3><p class="text-white/80 text-sm">${m.dosis}</p></div></div><div class="p-4"><div class="grid grid-cols-2 gap-4 text-sm"><div><p class="text-gray-400">Frecuencia</p><p class="font-bold text-gray-800">Cada ${m.frecuencia}h</p></div><div><p class="text-gray-400">Próxima toma</p><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="mt-3 pt-3 border-t flex gap-2"><button onclick="openModal('edit',state.meds.find(x=>x.id==='${m.id}'))" class="flex-1 text-indigo-500 py-2 text-sm font-medium">✏️ Editar</button><button onclick="delMed('${m.id}')" class="flex-1 text-red-500 py-2 text-sm font-medium">🗑️ Eliminar</button></div></div></div>`).join('')}</div>`
+    return`<div class="bg-white p-4 border-b sticky top-0 z-10 flex justify-between items-center"><div><h1 class="text-xl font-bold text-gray-800">💊 Medicamentos</h1><p class="text-sm text-gray-500">${active.length} activos</p></div><button onclick="openModal('add')" class="bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-medium">+ Añadir</button></div><div class="p-4 space-y-3">${active.length===0?'<div class="text-center py-12"><div class="text-5xl mb-4">📋</div><p class="text-gray-500">No hay medicamentos</p></div>':''}${active.map(m=>`<div class="bg-white rounded-2xl shadow-md overflow-hidden"><div class="${m.color||'bg-gray-500'} p-4 flex items-center gap-3"><span class="text-3xl">💊</span><div class="text-white flex-1"><h3 class="font-bold text-lg">${m.nombre}</h3><p class="text-white/80 text-sm">${m.dosis}</p></div></div><div class="p-4"><div class="grid grid-cols-2 gap-4 text-sm"><div><p class="text-gray-400">Frecuencia</p><p class="font-bold text-gray-800">Cada ${m.frecuencia}h</p></div><div><p class="text-gray-400">Próxima toma</p><p class="font-bold text-orange-500">${m.proxima_toma}</p></div></div><div class="mt-3 pt-3 border-t flex gap-2"><button onclick="openModal('edit','${m.id}')" class="flex-1 text-indigo-500 py-2 text-sm font-medium">✏️ Editar</button><button onclick="delMed('${m.id}')" class="flex-1 text-red-500 py-2 text-sm font-medium">🗑️ Eliminar</button></div></div></div>`).join('')}</div>`
 }
 
 function renderHistory(){
