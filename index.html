@@ -158,7 +158,7 @@ const Cloud={
     }
 };
 
-// Gemini OCR - MEJORADO
+// Gemini OCR - ACTUALIZADO A GEMINI 2.5 FLASH
 const Gemini={
     async analyze(b64){
         console.log('📷 Iniciando análisis de imagen con Gemini...');
@@ -170,10 +170,11 @@ const Gemini={
             return [];
         }
         
-        const url=`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${CONFIG.GEMINI_API_KEY}`;
+        // ✅ CAMBIADO: Usar gemini-2.5-flash en lugar de gemini-2.0-flash
+        const url=`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${CONFIG.GEMINI_API_KEY}`;
         
         try{
-            console.log('📤 Enviando imagen a Gemini...');
+            console.log('📤 Enviando imagen a Gemini 2.5 Flash...');
             
             const prompt = `Analiza esta imagen de una receta médica o lista de medicamentos.
 
@@ -214,7 +215,13 @@ Si no puedes leer ningún medicamento en la imagen, responde: []`;
             if(!response.ok){
                 const errorText = await response.text();
                 console.error('❌ Error de API:', response.status, errorText);
-                U.toast(`Error de Gemini: ${response.status}`,'error');
+                
+                // Mensaje más claro para el usuario
+                if(response.status === 429){
+                    U.toast('Límite de API alcanzado. Espera un momento e inténtalo de nuevo.','error');
+                }else{
+                    U.toast(`Error de Gemini: ${response.status}`,'error');
+                }
                 return [];
             }
             
