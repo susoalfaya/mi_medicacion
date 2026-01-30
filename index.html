@@ -47,7 +47,7 @@ const CONFIG={
 let sbClient = null;
 let currentUser = null;
 
-const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false};
+const state={screen:'splash',tab:'home',meds:[],history:[],modal:null,selMed:null,pendingOCR:[],toast:null,aiAdvice:null,histFilter:{type:'day',medId:null,date:new Date()},perms:{camera:false,notif:false},loading:false,loadingMsg:'Procesando...'};
 
 // Utilidades
 const U={
@@ -158,25 +158,147 @@ const Cloud={
     }
 };
 
-// Gemini OCR
+// Gemini OCR - MEJORADO
 const Gemini={
     async analyze(b64){
-        if(CONFIG.GEMINI_API_KEY==='TU_GEMINI_API_KEY')return Gemini.mock();
+        console.log('📷 Iniciando análisis de imagen con Gemini...');
+        
+        // Verificar que tenemos API key
+        if(!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY==='TU_GEMINI_API_KEY'){
+            console.error('❌ No hay API key de Gemini configurada');
+            U.toast('Error: Configura la API key de Gemini','error');
+            return [];
+        }
+        
         const url=`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CONFIG.GEMINI_API_KEY}`;
+        
         try{
-            const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:'Analiza esta receta médica y devuelve JSON: [{"nombre":"...","dosis":"...","frecuencia":8,"dias":0,"notas":"..."}]. Responde SOLO el JSON.'},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{temperature:0.1}})});
-            const res=await r.json();let txt=res.candidates?.[0]?.content?.parts?.[0]?.text||'';
-            txt=txt.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-            return JSON.parse(txt)
+            console.log('📤 Enviando imagen a Gemini...');
+            
+            const prompt = `Analiza esta imagen de una receta médica o lista de medicamentos.
+
+IMPORTANTE: Extrae TODOS los medicamentos que veas en la imagen.
+
+Para cada medicamento encontrado, devuelve la siguiente información:
+- nombre: nombre del medicamento (exactamente como aparece)
+- dosis: dosis indicada (ej: "20mg", "500mg", "1 comprimido")
+- frecuencia: cada cuántas horas se debe tomar (número, ej: 8, 12, 24)
+- dias: duración del tratamiento en días (0 si es continuo o no se indica)
+- notas: instrucciones especiales (ej: "con comida", "en ayunas", "antes de dormir")
+
+Responde ÚNICAMENTE con un array JSON válido. Sin explicaciones, sin markdown, sin \`\`\`.
+Ejemplo de formato:
+[{"nombre":"Ibuprofeno","dosis":"600mg","frecuencia":8,"dias":7,"notas":"con comida"}]
+
+Si no puedes leer ningún medicamento en la imagen, responde: []`;
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    contents: [{
+                        parts: [
+                            {text: prompt},
+                            {inline_data: {mime_type: 'image/jpeg', data: b64}}
+                        ]
+                    }],
+                    generationConfig: {
+                        temperature: 0.1,
+                        maxOutputTokens: 2048
+                    }
+                })
+            });
+            
+            console.log('📥 Respuesta recibida, status:', response.status);
+            
+            if(!response.ok){
+                const errorText = await response.text();
+                console.error('❌ Error de API:', response.status, errorText);
+                U.toast(`Error de Gemini: ${response.status}`,'error');
+                return [];
+            }
+            
+            const res = await response.json();
+            console.log('📋 Respuesta completa:', JSON.stringify(res, null, 2));
+            
+            // Extraer el texto de la respuesta
+            let txt = res.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            console.log('📝 Texto extraído:', txt);
+            
+            if(!txt || txt.trim() === ''){
+                console.warn('⚠️ Respuesta vacía de Gemini');
+                U.toast('No se pudo analizar la imagen','error');
+                return [];
+            }
+            
+            // Limpiar el texto de posibles formatos markdown
+            txt = txt
+                .replace(/```json\s*/gi, '')
+                .replace(/```\s*/gi, '')
+                .replace(/^\s*\n/gm, '')
+                .trim();
+            
+            console.log('🧹 Texto limpio:', txt);
+            
+            // Intentar encontrar el array JSON en el texto
+            let jsonMatch = txt.match(/\[[\s\S]*\]/);
+            if(jsonMatch){
+                txt = jsonMatch[0];
+                console.log('🎯 JSON encontrado:', txt);
+            }
+            
+            // Parsear el JSON
+            let medicamentos;
+            try {
+                medicamentos = JSON.parse(txt);
+                console.log('✅ JSON parseado correctamente:', medicamentos);
+            } catch(parseError) {
+                console.error('❌ Error parseando JSON:', parseError);
+                console.log('Texto que falló:', txt);
+                U.toast('Error al procesar la respuesta','error');
+                return [];
+            }
+            
+            // Validar que es un array
+            if(!Array.isArray(medicamentos)){
+                console.error('❌ La respuesta no es un array:', medicamentos);
+                U.toast('Formato de respuesta inválido','error');
+                return [];
+            }
+            
+            // Validar y limpiar cada medicamento
+            const medsValidos = medicamentos
+                .filter(m => m && m.nombre && m.nombre.trim() !== '')
+                .map(m => ({
+                    nombre: String(m.nombre || '').trim(),
+                    dosis: String(m.dosis || 'Ver receta').trim(),
+                    frecuencia: parseInt(m.frecuencia) || 8,
+                    dias: parseInt(m.dias) || 0,
+                    notas: String(m.notas || '').trim()
+                }));
+            
+            console.log(`✅ ${medsValidos.length} medicamentos válidos encontrados:`, medsValidos);
+            
+            if(medsValidos.length === 0){
+                U.toast('No se encontraron medicamentos en la imagen','error');
+            }
+            
+            return medsValidos;
+            
         }catch(e){
-            console.error('Error en análisis Gemini:',e);
-            return Gemini.mock()
+            console.error('❌ Error en análisis Gemini:', e);
+            U.toast('Error de conexión con Gemini','error');
+            return [];
         }
     },
-    mock:()=>[{nombre:'Omeprazol',dosis:'20mg',frecuencia:24,dias:0,notas:'30 min antes desayuno'},{nombre:'Paracetamol',dosis:'1g',frecuencia:8,dias:0,notas:'Si hay dolor'}],
+    
     async advice(ctx,action){
-        const consejos={skip:'Has saltado una toma. Si es por mejoría, consulta con tu médico.',late:'La próxima toma se ha recalculado para mantener el intervalo correcto.',edit:'Has modificado la pauta. Consulta con tu médico cualquier cambio importante.'};
-        return consejos[action]||'Recuerda seguir las indicaciones de tu médico.'
+        const consejos={
+            skip:'Has saltado una toma. Si es por mejoría, consulta con tu médico.',
+            late:'La próxima toma se ha recalculado para mantener el intervalo correcto.',
+            edit:'Has modificado la pauta. Consulta con tu médico cualquier cambio importante.'
+        };
+        return consejos[action]||'Recuerda seguir las indicaciones de tu médico.';
     }
 };
 
@@ -302,9 +424,23 @@ const Act={
         state.modal=null;U.toast('🗑️ Eliminado');render()
     },
     async ocr(b64){
-        state.loading=true;render();
+        state.loading=true;
+        state.loadingMsg='🔍 Analizando receta con IA...';
+        render();
+        
         const ms=await Gemini.analyze(b64);
-        state.loading=false;state.pendingOCR=ms.map((m,i)=>({...m,checked:true,id:i}));state.modal='ocr-results';render()
+        
+        state.loading=false;
+        
+        if(ms.length === 0){
+            state.modal=null;
+            render();
+            return;
+        }
+        
+        state.pendingOCR=ms.map((m,i)=>({...m,checked:true,id:i}));
+        state.modal='ocr-results';
+        render();
     },
     confirmOCR(){
         const sel=state.pendingOCR.filter(m=>m.checked);
@@ -374,7 +510,7 @@ function renderApp(){
     else if(state.tab==='meds')content=renderMeds();
     else if(state.tab==='history')content=renderHistory();
     else if(state.tab==='profile')content=renderProfile();
-    return`<div class="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative"><div class="flex-1 overflow-y-auto pb-20 hide-scrollbar">${content}</div><div class="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg max-w-md mx-auto"><div class="flex justify-around py-2">${['home','meds','history','profile'].map(t=>`<button onclick="setTab('${t}')" class="flex flex-col items-center py-2 px-4 rounded-xl ${state.tab===t?'text-indigo-600 bg-indigo-50':'text-gray-400'}"><span class="text-xl">${{home:'🏠',meds:'💊',history:'📊',profile:'👤'}[t]}</span><span class="text-xs mt-1">${{home:'Inicio',meds:'Medicinas',history:'Historial',profile:'Perfil'}[t]}</span></button>`).join('')}</div></div>${state.modal?renderModal():''}${state.aiAdvice?renderAI():''}${state.toast?`<div class="fixed top-4 left-4 right-4 z-50 max-w-md mx-auto animate-slideDown"><div class="${state.toast.type==='success'?'bg-green-500':'bg-red-500'} text-white p-4 rounded-2xl shadow-xl flex items-center gap-3"><span class="text-xl">${state.toast.type==='success'?'✓':'!'}</span><p class="font-medium">${state.toast.msg}</p></div></div>`:''}${state.loading?'<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div class="bg-white rounded-2xl p-6 flex flex-col items-center"><div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div><p class="text-gray-600">Procesando...</p></div></div>':''}</div>`
+    return`<div class="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative"><div class="flex-1 overflow-y-auto pb-20 hide-scrollbar">${content}</div><div class="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg max-w-md mx-auto"><div class="flex justify-around py-2">${['home','meds','history','profile'].map(t=>`<button onclick="setTab('${t}')" class="flex flex-col items-center py-2 px-4 rounded-xl ${state.tab===t?'text-indigo-600 bg-indigo-50':'text-gray-400'}"><span class="text-xl">${{home:'🏠',meds:'💊',history:'📊',profile:'👤'}[t]}</span><span class="text-xs mt-1">${{home:'Inicio',meds:'Medicinas',history:'Historial',profile:'Perfil'}[t]}</span></button>`).join('')}</div></div>${state.modal?renderModal():''}${state.aiAdvice?renderAI():''}${state.toast?`<div class="fixed top-4 left-4 right-4 z-50 max-w-md mx-auto animate-slideDown"><div class="${state.toast.type==='success'?'bg-green-500':'bg-red-500'} text-white p-4 rounded-2xl shadow-xl flex items-center gap-3"><span class="text-xl">${state.toast.type==='success'?'✓':'!'}</span><p class="font-medium">${state.toast.msg}</p></div></div>`:''}${state.loading?`<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div class="bg-white rounded-2xl p-6 flex flex-col items-center"><div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div><p class="text-gray-600">${state.loadingMsg}</p></div></div>`:''}</div>`
 }
 
 function renderHome(pend,comp,prog,now,date){
@@ -401,7 +537,7 @@ function renderModal(){
     if(state.modal==='edit'&&m)return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="${m.color||'bg-indigo-500'} p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">✏️ Editar</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="eNombre" value="${m.nombre}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eDosis" value="${m.dosis}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="eFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3">${[4,6,8,12,24].map(h=>`<option value="${h}" ${m.frecuencia===h?'selected':''}>${h}h</option>`).join('')}</select><input type="time" id="eHora" value="${m.hora_inicio||'08:00'}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="number" id="eDias" value="${m.dias||0}" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="eNotas" value="${m.notas||''}" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveEdit()" class="w-full bg-indigo-500 text-white py-3 rounded-xl font-bold">💾 Guardar</button></div></div></div>`;
     if(state.modal==='add')return`<div class="fixed inset-0 bg-black/60 z-50 flex items-end justify-center" onclick="if(event.target===this)closeModal()"><div class="bg-white rounded-t-3xl w-full max-w-md overflow-hidden animate-slideUp max-h-[90vh] overflow-y-auto"><div class="bg-green-500 p-4 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Añadir</h2><button onclick="closeModal()" class="text-white/80">✕</button></div><div class="p-4 space-y-4"><input type="text" id="nNombre" placeholder="Nombre" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nDosis" placeholder="Dosis" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><select id="nFrec" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><option value="8">8h</option><option value="12">12h</option><option value="24">24h</option></select><input type="time" id="nHora" value="08:00" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><input type="text" id="nNotas" placeholder="Notas" class="w-full border-2 border-gray-200 rounded-xl px-4 py-3"><button onclick="saveNew()" class="w-full bg-green-500 text-white py-3 rounded-xl font-bold">✅ Guardar</button></div></div></div>`;
     if(state.modal==='camera')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="p-4 flex justify-between items-center"><button onclick="closeModal()" class="text-white text-2xl">✕</button><h2 class="text-white font-bold">📷 Escanear receta</h2><div class="w-8"></div></div><div class="flex-1 flex flex-col items-center justify-center gap-6 p-8"><button onclick="captureRecipe()" class="w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">📷</span> Hacer foto</button><button onclick="scanRecipe()" class="w-full bg-white text-gray-800 px-8 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-lg"><span class="text-2xl">🖼️</span> Elegir de galería</button><p class="text-white/60 text-sm text-center mt-4">Fotografía tu receta médica y la analizaremos automáticamente con IA</p></div></div>`;
-    if(state.modal==='ocr-results')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="bg-white flex-1 rounded-t-3xl mt-16 overflow-auto"><div class="p-4 border-b"><h3 class="font-bold text-lg">Medicamentos detectados</h3></div><div class="p-4 space-y-2">${state.pendingOCR.map(med=>`<div onclick="toggleOCR(${med.id})" class="p-4 rounded-xl border-2 ${med.checked?'border-green-500 bg-green-50':'border-gray-200'}"><h4 class="font-bold">${med.nombre}</h4><p class="text-sm text-gray-500">${med.dosis}</p></div>`).join('')}</div><div class="p-4 border-t"><button onclick="confirmOCR()" class="w-full bg-green-500 text-white py-4 rounded-xl font-bold">Añadir seleccionados</button></div></div></div>`;
+    if(state.modal==='ocr-results')return`<div class="fixed inset-0 bg-black z-50 flex flex-col"><div class="bg-white flex-1 rounded-t-3xl mt-16 overflow-auto"><div class="p-4 border-b"><h3 class="font-bold text-lg">✅ Medicamentos detectados</h3><p class="text-sm text-gray-500">Selecciona los que quieras añadir</p></div><div class="p-4 space-y-2">${state.pendingOCR.map(med=>`<div onclick="toggleOCR(${med.id})" class="p-4 rounded-xl border-2 cursor-pointer ${med.checked?'border-green-500 bg-green-50':'border-gray-200'}"><div class="flex items-center gap-3"><div class="w-6 h-6 rounded-full border-2 flex items-center justify-center ${med.checked?'bg-green-500 border-green-500 text-white':'border-gray-300'}">${med.checked?'✓':''}</div><div class="flex-1"><h4 class="font-bold">${med.nombre}</h4><p class="text-sm text-gray-500">${med.dosis} - cada ${med.frecuencia}h</p>${med.notas?`<p class="text-xs text-gray-400 mt-1">📝 ${med.notas}</p>`:''}</div></div></div>`).join('')}</div><div class="p-4 border-t"><button onclick="confirmOCR()" class="w-full bg-green-500 text-white py-4 rounded-xl font-bold">Añadir ${state.pendingOCR.filter(m=>m.checked).length} medicamentos</button><button onclick="closeModal()" class="w-full mt-2 text-gray-500 py-2">Cancelar</button></div></div></div>`;
     return''
 }
 
